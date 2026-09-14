@@ -133,7 +133,9 @@ def _collect_anims(model: M2Model, stem: str, source: AssetSource | None,
         name = anim_filename(stem + ".m2", ref.anim_id, ref.sub_anim_id)
         sub = FileResult(source=name, kind="anim")
         try:
-            data, sub = convert_anim(raw, name, opts, model, sub)
+            data, sub = convert_anim(raw, name, opts, model, sub,
+                                     anim_id=ref.anim_id,
+                                     sub_id=ref.sub_anim_id)
         except Exception as exc:  # noqa: BLE001 - reported per file
             sub.fail("anim.error", f"{type(exc).__name__}: {exc}")
             out.append(ConvertedAsset(name, b"", sub))

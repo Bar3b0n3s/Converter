@@ -252,3 +252,52 @@ def test_inspect_reports_compatibility(modern_m2):
 def test_anim_filename_matches_the_client_convention():
     assert anim_filename("Bear.m2", 0, 0) == "Bear0000-00.anim"
     assert anim_filename("path/to/Bear.m2", 42, 3) == "Bear0042-03.anim"
+
+
+# ---------------------------------------------------------------------------
+# Sequences whose keyframes live in a sibling .anim
+# ---------------------------------------------------------------------------
+def test_a_sequence_flagged_external_is_not_read_out_of_the_model():
+    """Its offsets address the .anim, so whatever is at them here is not it."""
+    model = F.build_modern_model(sequences=2, external_sequence=1)
+    raw = F.serialise_modern_m2(model)
+    parsed = parse_m2(raw, "t.m2")
+    translation = parsed.bones[0]["translation"]
+    assert translation.external == {1}
+    assert translation.values[1] == []
+    # the embedded sequence is untouched
+    assert translation.values[0] == model.bones[0]["translation"].values[0]
+
+
+def test_a_flat_model_is_never_guessed_at():
+    """Marking an embedded sequence external would throw its keyframes away."""
+    model = F.build_modern_model(sequences=2, external_sequence=1, version=264)
+    parsed = parse_m2(F.serialise_modern_m2(model, chunked=False), "t.m2")
+    assert parsed.bones[0]["translation"].external == set()
+    assert parsed.bones[0]["translation"].values[1]
+
+
+def test_an_external_sub_array_keeps_the_offset_it_came_with():
+    """Re-pointing it at the converted model would break the .anim link."""
+    from wotlkconv.m2.types import DeferredWriter, M2TRACK_SIZE
+
+    track = F.external_track("vec3", sequences=2, index=1, offset=4096)
+    w = DeferredWriter()
+    w.reserve(M2TRACK_SIZE)
+    w.write_track(0, track)
+    w.flush()
+    out = w.getvalue()
+
+    count, offset = struct.unpack_from("<II", out, 4)       # timestamps
+    subs = [struct.unpack_from("<II", out, offset + i * 8) for i in range(count)]
+    assert subs[1] == (2, 4096)          # verbatim, addressing the .anim
+    assert subs[0] != (2, 4096)          # the embedded one was rewritten
+
+
+def test_a_span_that_runs_off_the_end_is_treated_as_external_not_fatal():
+    from wotlkconv.m2.types import StructReader, Track
+
+    reader = StructReader(b"\0" * 64, "t.m2")
+    track = Track(kind="vec3")
+    assert reader._sub_array(track, 0, "vec3", (100, 900000)) == []
+    assert track.external == {0}

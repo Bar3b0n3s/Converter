@@ -68,6 +68,11 @@ def _fmt(kind: str) -> struct.Struct:
     return s
 
 
+def value_size(kind: str) -> int:
+    """Bytes one element of ``kind`` occupies in a file."""
+    return _fmt(kind).size
+
+
 def _is_scalar(kind: str) -> bool:
     return len(VALUE_FORMATS[kind]) == 1
 
@@ -84,6 +89,19 @@ class Track:
     global_sequence: int = -1
     timestamps: list[list[int]] = dataclasses.field(default_factory=list)
     values: list[list[Any]] = dataclasses.field(default_factory=list)
+    #: Raw ``(count, offset)`` of each sub-array as the source file wrote it.
+    timestamp_spans: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    value_spans: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    #: Sequence indices whose keyframes live in an external ``.anim``, so the
+    #: spans above point into that file and the lists above are empty.
+    external: set[int] = dataclasses.field(default_factory=set)
+
+    def span_for(self, index: int, spans: list[tuple[int, int]]
+                 ) -> tuple[int, int] | None:
+        """The verbatim header to re-emit, or ``None`` to write the keys."""
+        if index not in self.external or index >= len(spans):
+            return None
+        return spans[index]
 
     def key_count(self) -> int:
         return sum(len(v) for v in self.values)
@@ -98,6 +116,9 @@ class Track:
         """Clamp the per-sequence sub-arrays to ``sequence_count`` entries."""
         del self.timestamps[sequence_count:]
         del self.values[sequence_count:]
+        del self.timestamp_spans[sequence_count:]
+        del self.value_spans[sequence_count:]
+        self.external = {i for i in self.external if i < sequence_count}
         while len(self.timestamps) < len(self.values):
             self.timestamps.append([])
         while len(self.values) < len(self.timestamps):
@@ -111,9 +132,19 @@ class TrackBase:
     interpolation: int = 0
     global_sequence: int = -1
     timestamps: list[list[int]] = dataclasses.field(default_factory=list)
+    timestamp_spans: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    external: set[int] = dataclasses.field(default_factory=set)
+
+    def span_for(self, index: int, spans: list[tuple[int, int]]
+                 ) -> tuple[int, int] | None:
+        if index not in self.external or index >= len(spans):
+            return None
+        return spans[index]
 
     def trim_to(self, sequence_count: int) -> None:
         del self.timestamps[sequence_count:]
+        del self.timestamp_spans[sequence_count:]
+        self.external = {i for i in self.external if i < sequence_count}
 
 
 @dataclasses.dataclass(slots=True)
@@ -131,9 +162,13 @@ class PartTrack:
 class StructReader:
     """Reads schema-described structs out of a flat M2 buffer."""
 
-    def __init__(self, data: bytes, name: str = "<m2>"):
+    def __init__(self, data: bytes, name: str = "<m2>",
+                 external_sequences: set[int] | None = None):
         self.data = data
         self.name = name
+        #: Sequence indices the header says are stored in an external .anim.
+        #: Their sub-arrays address that file, so they are never read here.
+        self.external_sequences = external_sequences or set()
 
     # -- low level ------------------------------------------------------
     def array_header(self, pos: int) -> tuple[int, int]:
@@ -173,17 +208,39 @@ class StructReader:
         raw = self.data[offset : offset + count]
         return raw.split(b"\0", 1)[0].decode("latin-1")
 
+    def _sub_array(self, track, index: int, kind: str,
+                   span: tuple[int, int]) -> list[Any]:
+        """One sequence's keyframes, or nothing if they are not in this file.
+
+        A sequence the header marks external keeps its keyframes in a sibling
+        ``.anim``, so the span addresses that file and reading it here would
+        return whatever happens to sit at the same offset in the model.  A
+        span that simply runs off the end is treated the same way rather than
+        failing the model: it is the same situation, told by its consequence
+        instead of by the flag.
+        """
+        if index in self.external_sequences:
+            track.external.add(index)
+            return []
+        try:
+            return self.read_values(kind, span[0], span[1])
+        except ValueError:
+            track.external.add(index)
+            return []
+
     def read_track(self, kind: str, pos: int) -> Track:
         interp, gseq = struct.unpack_from("<hh", self.data, pos)
         t = Track(kind=kind, interpolation=interp, global_sequence=gseq)
         tcount, toff = self.array_header(pos + 4)
         vcount, voff = self.array_header(pos + 12)
         for i in range(tcount):
-            c, o = self.array_header(toff + i * M2ARRAY_SIZE)
-            t.timestamps.append(self.read_values("u32", c, o))
+            span = self.array_header(toff + i * M2ARRAY_SIZE)
+            t.timestamp_spans.append(span)
+            t.timestamps.append(self._sub_array(t, i, "u32", span))
         for i in range(vcount):
-            c, o = self.array_header(voff + i * M2ARRAY_SIZE)
-            t.values.append(self.read_values(kind, c, o))
+            span = self.array_header(voff + i * M2ARRAY_SIZE)
+            t.value_spans.append(span)
+            t.values.append(self._sub_array(t, i, kind, span))
         # Some tools emit mismatched counts; pad so the two stay in lockstep.
         while len(t.timestamps) < len(t.values):
             t.timestamps.append([])
@@ -196,8 +253,9 @@ class StructReader:
         t = TrackBase(interpolation=interp, global_sequence=gseq)
         tcount, toff = self.array_header(pos + 4)
         for i in range(tcount):
-            c, o = self.array_header(toff + i * M2ARRAY_SIZE)
-            t.timestamps.append(self.read_values("u32", c, o))
+            span = self.array_header(toff + i * M2ARRAY_SIZE)
+            t.timestamp_spans.append(span)
+            t.timestamps.append(self._sub_array(t, i, "u32", span))
         return t
 
     def read_parttrack(self, kind: str, pos: int) -> PartTrack:
@@ -262,6 +320,11 @@ class DeferredWriter(Writer):
             return
         self._queue.append((pos, count, emit))
 
+    def patch_span(self, pos: int, span: tuple[int, int]) -> None:
+        """Write an M2Array header verbatim, addressing another file."""
+        self.patch_u32(pos, span[0])
+        self.patch_u32(pos + 4, span[1])
+
     def write_array(self, pos: int, kind: str, values: Sequence[Any]) -> None:
         self.defer(pos, len(values), lambda w: w.write_values(kind, values))
 
@@ -291,13 +354,21 @@ class DeferredWriter(Writer):
 
         def emit_stamps(w: "DeferredWriter") -> None:
             heads = [w.reserve_array() for _ in stamps]
-            for head, seq in zip(heads, stamps):
-                w.write_array(head, "u32", seq)
+            for i, (head, seq) in enumerate(zip(heads, stamps)):
+                span = track.span_for(i, track.timestamp_spans)
+                if span is not None:
+                    w.patch_span(head, span)
+                else:
+                    w.write_array(head, "u32", seq)
 
         def emit_values(w: "DeferredWriter") -> None:
             heads = [w.reserve_array() for _ in values]
-            for head, seq in zip(heads, values):
-                w.write_array(head, track.kind, seq)
+            for i, (head, seq) in enumerate(zip(heads, values)):
+                span = track.span_for(i, track.value_spans)
+                if span is not None:
+                    w.patch_span(head, span)
+                else:
+                    w.write_array(head, track.kind, seq)
 
         self.defer(pos + 4, len(stamps), emit_stamps)
         self.defer(pos + 12, len(values), emit_values)
@@ -309,8 +380,12 @@ class DeferredWriter(Writer):
 
         def emit_stamps(w: "DeferredWriter") -> None:
             heads = [w.reserve_array() for _ in stamps]
-            for head, seq in zip(heads, stamps):
-                w.write_array(head, "u32", seq)
+            for i, (head, seq) in enumerate(zip(heads, stamps)):
+                span = track.span_for(i, track.timestamp_spans)
+                if span is not None:
+                    w.patch_span(head, span)
+                else:
+                    w.write_array(head, "u32", seq)
 
         self.defer(pos + 4, len(stamps), emit_stamps)
 

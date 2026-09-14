@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import dataclasses
 import struct
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from ..chunks import Chunk, ChunkReader
 from ..errors import MalformedFileError, UnsupportedFormatError
 from ..limits import M2_GLOBAL_FLAG_USE_COMBINER_COMBOS, M2_MAGIC
 from . import schemas
-from .types import Schema, StructReader
+from .types import Schema, StructReader, Track, TrackBase
 
 #: Chunk names that can appear next to MD21 in a modern M2.
 KNOWN_M2_CHUNKS = {
@@ -151,6 +151,17 @@ class M2Model:
     def uses_external_skeleton(self) -> bool:
         return bool(self.skeleton_file_id) and not self.bones
 
+    def tracks(self) -> "Iterator[Track | TrackBase]":
+        """Every animation track in the model, wherever it is nested."""
+        groups = (self.bones, self.colors, self.texture_weights,
+                  self.texture_transforms, self.attachments, self.events,
+                  self.lights, self.cameras, self.ribbons, self.particles)
+        for group in groups:
+            for item in group:
+                for value in item.values():
+                    if isinstance(value, (Track, TrackBase)):
+                        yield value
+
     def describe(self) -> str:
         return (f"M2 v{self.version} '{self.name}' "
                 f"{self.vertex_count} verts, {len(self.bones)} bones, "
@@ -235,7 +246,33 @@ def _read_variable_structs(sr: StructReader, data: bytes, pos: int,
 # ---------------------------------------------------------------------------
 # MD20 body
 # ---------------------------------------------------------------------------
-def parse_md20(data: bytes, name: str = "<m2>") -> M2Model:
+#: An M2Sequence with none of these bits set keeps its keyframes outside the
+#: model.  This is the test the client itself makes, and it is only consulted
+#: for a chunked model that has no AFID to be exact about it.
+SEQUENCE_EMBEDDED_FLAGS = 0x130
+
+
+def external_sequences(sequences: Sequence[dict],
+                       chunked: bool = False) -> set[int]:
+    """Which sequences keep their keyframes in a sibling ``.anim``.
+
+    The sequence flags decide, because that is the test the client makes.
+    AFID is deliberately not consulted: it says where an animation's file is,
+    not whether the keyframes left the model, and models do carry AFID entries
+    for sequences that are embedded all the same.
+
+    A flat model is left alone.  Reading an embedded sequence as external
+    throws its keyframes away, so the guess is only made where the format
+    gives a reason to: a chunked, modern model.
+    """
+    if not chunked:
+        return set()
+    return {i for i, seq in enumerate(sequences)
+            if not seq.get("flags", 0) & SEQUENCE_EMBEDDED_FLAGS}
+
+
+def parse_md20(data: bytes, name: str = "<m2>",
+               chunked: bool = False) -> M2Model:
     """Parse a flat MD20 blob (offsets relative to ``data[0]``)."""
     if len(data) < HEADER_SIZE_BASE:
         raise MalformedFileError(f"{name}: MD20 body is only {len(data)} bytes")
@@ -258,6 +295,13 @@ def parse_md20(data: bytes, name: str = "<m2>") -> M2Model:
     m.sequence_schema = schemas.sequence_schema(version)
     m.sequences = _read_structs(sr, m.sequence_schema, data, _H["sequences"])
     m.sequence_lookups = sr.read_array("u16", _H["sequence_lookups"])
+
+    # Every track below is indexed by sequence, and a sequence stored in an
+    # .anim has sub-arrays addressing that file instead of this one.  Settle
+    # which those are before reading a single track: an offset into the .anim
+    # usually lands somewhere inside a model of this size, so reading one here
+    # yields plausible-looking keyframes rather than an error.
+    sr.external_sequences = external_sequences(m.sequences, chunked)
 
     m.bones = _read_structs(sr, schemas.BONE, data, _H["bones"])
     m.key_bone_lookup = sr.read_array("u16", _H["key_bone_lookup"])
@@ -344,7 +388,7 @@ def parse_m2(data: bytes, name: str = "<m2>") -> M2Model:
             f"(first chunk was {head!r})"
         )
 
-    model = parse_md20(md21[0].data, name)
+    model = parse_md20(md21[0].data, name, chunked=True)
     model.chunked = True
 
     for cname, entries in chunks.items():

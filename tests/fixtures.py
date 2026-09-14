@@ -60,9 +60,24 @@ def make_track(kind: str, sequences: int, keys_per_sequence: int = 2,
     return t
 
 
+def external_track(kind: str, sequences: int, index: int, offset: int,
+                   keys: int = 2) -> Track:
+    """A track whose sequence ``index`` points into a sibling .anim."""
+    t = make_track(kind, sequences, keys)
+    t.timestamps[index] = []
+    t.values[index] = []
+    t.timestamp_spans = [(0, 0)] * sequences
+    t.value_spans = [(0, 0)] * sequences
+    t.timestamp_spans[index] = (keys, offset)
+    t.value_spans[index] = (keys, offset + keys * 4)
+    t.external = {index}
+    return t
+
+
 def build_modern_model(*, sequences: int = 2, bones: int = 3, vertices: int = 6,
                        textures: int = 2, particles: int = 1, cameras: int = 1,
                        ribbons: int = 1, lights: int = 1,
+                       external_sequence: int | None = None,
                        version: int = 272) -> M2Model:
     """A small but structurally complete Legion-era model."""
     m = M2Model(version=version)
@@ -74,8 +89,10 @@ def build_modern_model(*, sequences: int = 2, bones: int = 3, vertices: int = 6,
     m.sequence_schema = seq_schema
     for i in range(sequences):
         s = seq_schema.defaults()
+        # A sequence with none of the 0x130 bits keeps its keys in an .anim.
+        flags = 0x00 if i == external_sequence else 0x20
         s.update(id=i, variation_index=0, duration=1000 + i, movespeed=1.5,
-                 flags=0x20, frequency=32767, replay_min=0, replay_max=0,
+                 flags=flags, frequency=32767, replay_min=0, replay_max=0,
                  bounds_min=(-1.0, -1.0, -1.0), bounds_max=(1.0, 1.0, 1.0),
                  bounds_radius=1.732, variation_next=-1, alias_next=0)
         if version >= 272:

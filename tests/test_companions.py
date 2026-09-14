@@ -7,7 +7,8 @@ import pytest
 import fixtures as F
 from wotlkconv.errors import MalformedFileError, UnsupportedFormatError
 from wotlkconv.limits import SKIN_HEADER_SIZE_WOTLK
-from wotlkconv.m2.anim import convert_anim, inspect_anim
+from wotlkconv.m2.anim import (anim_spans, convert_anim, inspect_anim,
+                                measure_offset_base)
 from wotlkconv.m2.convert import convert_m2
 from wotlkconv.m2.model import parse_m2
 from wotlkconv.m2.skel import load_skeleton_chain, parse_skel
@@ -191,3 +192,88 @@ def test_missing_skins_are_reported(listfile, source):
     _out, res, companions = convert_m2(raw, "t.m2", Options(), listfile, source)
     assert companions == []
     assert any(n.code == "m2.skin.missing" for n in res.notes)
+
+
+# ---------------------------------------------------------------------------
+# Where the model counts its .anim offsets from
+# ---------------------------------------------------------------------------
+def _model_with_external_keys(offset: int, keys: int = 2):
+    """A model whose sequence 1 keeps `keys` keyframes at `offset`."""
+    model = F.build_modern_model(sequences=2, external_sequence=1)
+    model.bones[0]["translation"] = F.external_track(
+        "vec3", sequences=2, index=1, offset=offset, keys=keys)
+    return model
+
+
+def test_offsets_counted_from_the_payload_are_recognised():
+    """A span starting at 0 cannot be counted from the file: 0 is the magic."""
+    # 2 timestamps (8 bytes) then 2 vec3 values (24) = 32 bytes of payload.
+    model = _model_with_external_keys(0)
+    out, res = convert_anim(F.build_anim(b"\x01" * 32), "t.anim", Options(),
+                            model, anim_id=1, sub_id=0)
+    assert len(out) == 32                      # the payload alone
+    assert any(n.code == "anim.offsets.payload" for n in res.notes)
+
+
+def test_offsets_counted_from_the_file_keep_the_header_as_padding():
+    """The keys sit 8 bytes in, so the payload must stay 8 bytes in."""
+    model = _model_with_external_keys(8)
+    out, res = convert_anim(F.build_anim(b"\x01" * 32), "t.anim", Options(),
+                            model, anim_id=1, sub_id=0)
+    assert len(out) == 40                      # 8 bytes of header + 32
+    assert out[8:] == b"\x01" * 32
+    assert any(n.code == "anim.offsets.file" for n in res.notes)
+
+
+def test_a_span_running_past_the_payload_end_settles_it():
+    """32 bytes of keys starting 8 in need 40: only the file reading holds."""
+    spans = anim_spans(_model_with_external_keys(8), 1, 0)
+    payload_base, file_base = measure_offset_base(spans, payload_len=32,
+                                                  body_start=8)
+    assert not payload_base.usable                  # 8 bytes short
+    assert file_base.usable and file_base.exact
+
+
+def test_the_reading_that_fills_the_file_exactly_wins():
+    """Both readings fit a roomier file; one ends where the file does."""
+    spans = anim_spans(_model_with_external_keys(8), 1, 0)
+    payload_base, file_base = measure_offset_base(spans, payload_len=40,
+                                                  body_start=8)
+    assert payload_base.usable and file_base.usable
+    assert payload_base.exact and not file_base.exact
+
+
+def test_where_nothing_distinguishes_them_the_payload_is_kept():
+    """Both fit, neither fills: prefer the reading that rewrites nothing."""
+    spans = anim_spans(_model_with_external_keys(8), 1, 0)
+    payload_base, file_base = measure_offset_base(spans, payload_len=64,
+                                                  body_start=8)
+    assert payload_base.usable and file_base.usable
+    assert not payload_base.exact and not file_base.exact
+    out, res = convert_anim(F.build_anim(b"\x01" * 64), "t.anim", Options(),
+                            _model_with_external_keys(8), anim_id=1, sub_id=0)
+    assert len(out) == 64
+    assert any(n.code == "anim.offsets.payload" for n in res.notes)
+
+
+def test_a_model_that_names_nothing_leaves_the_offsets_alone():
+    model = F.build_modern_model(sequences=2)     # nothing external
+    out, res = convert_anim(F.build_anim(b"\x01" * 32), "t.anim", Options(),
+                            model, anim_id=1, sub_id=0)
+    assert len(out) == 32
+    assert any(n.code == "anim.offsets.unmeasured" for n in res.notes)
+
+
+def test_spans_that_fit_neither_reading_are_reported():
+    model = _model_with_external_keys(9000)
+    out, res = convert_anim(F.build_anim(b"\x01" * 32), "t.anim", Options(),
+                            model, anim_id=1, sub_id=0)
+    assert len(out) == 32                      # unchanged, and said so
+    assert any(n.code == "anim.offsets.unfit" for n in res.notes)
+
+
+def test_only_the_animation_this_file_covers_is_measured():
+    model = _model_with_external_keys(8)
+    assert anim_spans(model, 1, 0)             # sequence 1 is this file
+    assert anim_spans(model, 0, 0) == []       # sequence 0 is embedded
+    assert anim_spans(model, 7, 0) == []       # no such animation
