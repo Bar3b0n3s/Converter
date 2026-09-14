@@ -352,11 +352,11 @@ def test_casc_selection_groups_and_claims_like_the_disk_planner(casc_install):
         jobs, skipped = plan_casc(storage, listfile, include=["**"])
         # Skins, anims and WMO groups are claimed by the model and root that
         # pull them in, so they are not planned separately; the .wav is
-        # classified as a copy and keeps its "unknown" kind.
+        # recognised as audio and copied.
         assert sorted(j.kind for j in jobs) == [
             detect.ADT, detect.BLP, detect.BLP, detect.M2,
-            detect.UNKNOWN, detect.WMO_ROOT]
-        assert [j.action for j in jobs if j.kind == detect.UNKNOWN] == [detect.COPY]
+            detect.WAV, detect.WMO_ROOT]
+        assert [j.action for j in jobs if j.kind == detect.WAV] == [detect.COPY]
         # The tile's three pieces became one job.
         adt = next(j for j in jobs if j.kind == detect.ADT)
         assert sorted(adt.extra_ids) == ["obj0", "tex0"]

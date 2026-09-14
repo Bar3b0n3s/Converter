@@ -3,6 +3,14 @@
 Extensions are a hint, not proof: assets extracted by FileDataID arrive as
 ``1234567.unknown``, and ``.wmo`` covers both roots and groups.  Detection
 therefore always looks at the bytes.
+
+That applies to every format, not only the ones this tool converts.  A build
+read straight out of CASC has no filenames at all -- the listfile supplies
+them, and it never covers everything -- so a sound or a font that is only
+recognised by its extension has no extension to be recognised by, and would
+land as an anonymous ``.bin`` that no client will ever look up.  Each family
+below is therefore identified by its signature as well, so a file keeps its
+identity even when nothing names it.
 """
 
 from __future__ import annotations
@@ -23,6 +31,24 @@ WDT = "wdt"
 WDL = "wdl"
 DB2 = "db2"
 DBC = "dbc"
+
+# Formats that are not converted but still have to be recognised: a patch
+# archive needs the ones 3.3.5a reads, and the ones it cannot read are better
+# named than carried along as anonymous bytes.
+WAV = "wav"
+MP3 = "mp3"
+OGG = "ogg"
+AVI = "avi"
+MP4 = "mp4"
+BNK = "bnk"           # Wwise sound bank
+WEM = "wem"           # Wwise encoded media
+TTF = "ttf"
+OTF = "otf"
+TGA = "tga"
+DDS = "dds"
+PNG = "png"
+BLS = "bls"           # compiled shaders
+TEXT = "text"         # .lua/.xml/.toc/.txt and friends
 UNKNOWN = "unknown"
 
 # What to do with a file, once its kind is known.
@@ -41,9 +67,14 @@ COPY_EXTENSIONS = {
     ".wav", ".mp3", ".ogg",                    # sound and music
     ".avi",                                    # cinematics
     ".lua", ".xml", ".toc", ".txt", ".html",   # interface
+    ".xsd", ".css", ".js",                     # interface support files
     ".ttf", ".otf",                            # fonts
     ".zmp",                                    # minimap block data
-    ".sbt", ".wtf", ".ini",
+    ".trs",                                    # minimap name translation table
+    ".tga",                                    # loading screens and raw art
+    ".sbt", ".wtf", ".ini", ".cfg",
+    ".wlw", ".wlq", ".wlm",                    # liquid volumes (see below)
+    ".lit", ".def",                            # pre-Wrath light and definition
 }
 
 #: Extensions that exist in modern builds but cannot be used by 3.3.5a, with
@@ -51,14 +82,45 @@ COPY_EXTENSIONS = {
 UNSUPPORTED_EXTENSIONS = {
     ".db2": "client database; convert it with 'wotlkconv db convert', or pass "
             "--dbd to a convert run so the tables with mappings come along",
-    ".tex": "Legion streamed high-resolution texture payloads; 3.3.5a loads "
-            "whole BLPs instead",
+    ".tex": "Legion streamed high-resolution texture payloads; the .blp beside "
+            "it already carries every mip 3.3.5a renders",
     ".phys": "physics rigs; 3.3.5a has no model physics",
     ".bone": "Legion bone override files; no 3.3.5a equivalent",
     ".mp4": "3.3.5a plays .avi cinematics, not .mp4",
     ".wwise": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
-    ".bnk": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
+    ".bnk": "Wwise sound banks; 3.3.5a plays loose .wav/.mp3/.ogg",
+    ".wem": "Wwise encoded media; 3.3.5a plays loose .wav/.mp3/.ogg and has "
+            "no Wwise runtime to unpack these",
+    ".bls": "compiled shaders for a renderer 3.3.5a does not have; it loads "
+            "its own from its own Shaders folder",
+    ".dds": "3.3.5a loads .blp textures, not .dds",
+    ".png": "3.3.5a loads .blp textures, not .png",
+    ".sig": "CASC content signature; describes the build, not an asset",
+    ".meta": "CASC content metadata; describes the build, not an asset",
+    ".blob": "client configuration blob, tied to the modern build",
+    ".pd4": "development server pathing data; never shipped to a client",
+    ".pm4": "development server pathing data; never shipped to a client",
     ".anim.skel": "unused",
+}
+
+#: What to do with a detected kind that is not converted, and why.  Detection
+#: by signature means these apply even when nothing named the file.
+KIND_ACTIONS = {
+    WAV: (COPY, ""),
+    MP3: (COPY, ""),
+    OGG: (COPY, ""),
+    AVI: (COPY, ""),
+    TTF: (COPY, ""),
+    OTF: (COPY, ""),
+    TGA: (COPY, ""),
+    TEXT: (COPY, ""),
+    DBC: (COPY, "already a 3.3.5a client database"),
+    MP4: (SKIP, UNSUPPORTED_EXTENSIONS[".mp4"]),
+    BNK: (SKIP, UNSUPPORTED_EXTENSIONS[".bnk"]),
+    WEM: (SKIP, UNSUPPORTED_EXTENSIONS[".wem"]),
+    BLS: (SKIP, UNSUPPORTED_EXTENSIONS[".bls"]),
+    DDS: (SKIP, UNSUPPORTED_EXTENSIONS[".dds"]),
+    PNG: (SKIP, UNSUPPORTED_EXTENSIONS[".png"]),
 }
 
 #: Output extension for each kind.
@@ -67,10 +129,71 @@ EXTENSIONS = {
     WMO_ROOT: ".wmo", WMO_GROUP: ".wmo", ADT: ".adt", WDT: ".wdt",
     WDL: ".wdl",
     DB2: ".db2", DBC: ".dbc",
+    WAV: ".wav", MP3: ".mp3", OGG: ".ogg", AVI: ".avi", MP4: ".mp4",
+    BNK: ".bnk", WEM: ".wem", TTF: ".ttf", OTF: ".otf",
+    TGA: ".tga", DDS: ".dds", PNG: ".png", BLS: ".bls", TEXT: ".txt",
+}
+
+#: Extensions that promise a format this tool converts.  If the bytes do not
+#: back the promise the file is broken, not unrecognised, and saying so beats
+#: copying it into a patch where the client will choke on it.
+CONVERTIBLE_EXTENSIONS = {
+    ".m2": "a model", ".skin": "a skin profile", ".anim": "an animation",
+    ".skel": "a skeleton", ".blp": "a texture", ".wmo": "a world object",
+    ".adt": "a terrain tile", ".wdt": "a map index",
+    ".wdl": "a low-resolution heightmap", ".dbc": "a client database",
 }
 
 #: Extensions that name a Cataclysm-and-later split terrain file.
 SPLIT_ADT_SUFFIXES = ("_obj0", "_obj1", "_tex0", "_tex1", "_lod")
+
+
+def _riff_kind(data: bytes) -> str:
+    """Tell a plain ``.wav`` from an ``.avi`` and from Wwise's ``.wem``.
+
+    All three are RIFF.  The form type at byte 8 separates AVI from WAVE, and
+    Wwise's own chunks (or its vendor format tag) separate ``.wem`` from a
+    sound 3.3.5a can actually play -- which matters, because one is worth
+    copying into a patch and the other is not.
+    """
+    form = data[8:12]
+    if form == b"AVI ":
+        return AVI
+    if form != b"WAVE":
+        return UNKNOWN
+
+    pos = 12
+    while pos + 8 <= len(data):
+        name = data[pos:pos + 4]
+        size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        if name in (b"vorb", b"seek", b"akd ", b"AKPK"):
+            return WEM
+        if name == b"fmt " and pos + 10 <= len(data):
+            tag = int.from_bytes(data[pos + 8:pos + 10], "little")
+            # 0xFFFF/0xFFFE are the vendor-extensible tags Wwise writes; a
+            # sound the old client can play is PCM or ADPCM.
+            if tag in (0xFFFF, 0xFFFE):
+                return WEM
+        if size <= 0:
+            break
+        pos += 8 + size + (size & 1)
+    return WAV
+
+
+def _looks_like_text(data: bytes) -> bool:
+    """True when the bytes read as a text file rather than a format.
+
+    Interface scripts, ``.toc`` manifests and translation tables have no magic
+    number, so the only thing that distinguishes them from anonymous data is
+    that they are text.
+    """
+    sample = data[:1024]
+    if not sample:
+        return False
+    if b"\0" in sample:
+        return False
+    printable = sum(1 for b in sample if 0x20 <= b < 0x7F or b in (9, 10, 13))
+    return printable >= len(sample) * 0.95
 
 
 def _chunk_names(data: bytes, limit: int = 6) -> list[str]:
@@ -108,6 +231,32 @@ def detect(data: bytes, path: str = "") -> str:
     if head[:3] in (b"WDC", b"WDB") and head[3:4].isalnum():
         return DB2
 
+    # -- formats this tool does not convert, but must still recognise ----
+    if head == b"RIFF":
+        kind = _riff_kind(data)
+        if kind is not UNKNOWN:
+            return kind
+    if head == b"OggS":
+        return OGG
+    if head[:3] == b"ID3" or (head[0] == 0xFF and head[1] & 0xE0 == 0xE0):
+        return MP3
+    if data[4:8] == b"ftyp":
+        return MP4
+    if head == b"BKHD" or head == b"AKPK":
+        return BNK
+    if head == b"OTTO":
+        return OTF
+    if head in (b"\x00\x01\x00\x00", b"true", b"ttcf"):
+        return TTF
+    if head == b"DDS ":
+        return DDS
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return PNG
+    if head in (b"GXSH", b"SHAD"):
+        return BLS
+    if data.rstrip(b"\0")[-18:-2] == b"TRUEVISION-XFILE":
+        return TGA
+
     names = _chunk_names(data)
     if names:
         if "MOHD" in names:
@@ -133,6 +282,10 @@ def detect(data: bytes, path: str = "") -> str:
         return SKEL
     if ext == ".wdl":
         return WDL
+
+    # Last, because anything with a signature has already been named by it.
+    if _looks_like_text(data):
+        return TEXT
     return UNKNOWN
 
 
@@ -152,16 +305,22 @@ def classify(kind: str, path: str = "",
         if convert_databases:
             return CONVERT, ""
         return SKIP, UNSUPPORTED_EXTENSIONS[".db2"]
-    if kind == DBC:
-        return COPY, "already a 3.3.5a client database"
     if kind in CONVERTIBLE:
         return CONVERT, ""
+    if kind in KIND_ACTIONS:
+        return KIND_ACTIONS[kind]
 
     ext = os.path.splitext(path)[1].lower()
     if ext in UNSUPPORTED_EXTENSIONS:
         return SKIP, UNSUPPORTED_EXTENSIONS[ext]
     if ext in COPY_EXTENSIONS:
         return COPY, ""
+    if ext in CONVERTIBLE_EXTENSIONS:
+        # Named as something convertible, but the bytes say otherwise.
+        # Copying it would put a file the client cannot read into the patch.
+        return SKIP, (f"named as {CONVERTIBLE_EXTENSIONS[ext]} ({ext}) but its "
+                      f"contents are not one -- truncated, encrypted, or "
+                      f"misnamed")
     if kind == UNKNOWN and ext:
         # An unrecognised extension is more likely to be data 3.3.5a can read
         # than something harmful, so carry it through and say so.
