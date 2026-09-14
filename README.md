@@ -11,11 +11,13 @@ tiles into four files and dropped the chunk index Wrath needs; BfA moved WMO
 texture and doodad names out of the file entirely. Copying a modern file into a
 3.3.5a patch archive does not work, and usually does not fail cleanly either.
 
-`wotlkconv` performs the structural downgrade, resolves the numeric references
-back into paths, and tells you exactly what it had to throw away.
+`wotlkconv` reads a game install directly, performs the structural downgrade,
+resolves the numeric references back into paths, and tells you exactly what it
+had to throw away.
 
 ```
-wotlkconv convert extracted/ -o patch-4/ --listfile listfile.csv -j4
+wotlkconv convert --casc "C:\World of Warcraft" --include "creature/**" \
+                  -o patch-4/ --listfile listfile.csv -j4
 ```
 
 ## What it converts
@@ -30,11 +32,69 @@ wotlkconv convert extracted/ -o patch-4/ --listfile listfile.csv -j4
 | `.wmo` root | Legion/BfA/Shadowlands | 3.3.5a v17 | rebuilds `MOTX`/`MODN`/`MOSB` from `MODI`/`MOSI` |
 | `.wmo` group | Shadowlands `MOVX`/`MPY2` | `MOVI`/`MOPY` | recomputes batch bounds, trims UV/colour layers |
 | `.adt` | Cataclysm+ split tiles | monolithic Wrath tile | rebuilds `MCIN`, merges `_tex0` and `_obj0` |
+| `.wdt` | BfA+ with `MAID` | 3.3.5a v17 | drops `MAID`, sets the big-alpha flag |
 
 Companion files are found automatically and renamed into the layout the client
 globs for — `Bear.m2` gets `Bear00.skin` … `Bear03.skin` and
 `Bear0000-00.anim`, a WMO root gets `Root_000.wmo` … — regardless of how the
 inputs were named.
+
+## What it does with everything else
+
+A patch archive needs more than the art. Every file is put in one of three
+buckets, and the report says which:
+
+- **Converted** — the formats in the table above.
+- **Copied through, byte for byte** — formats 3.3.5a reads unchanged: `.wav`,
+  `.mp3`, `.ogg`, `.avi`, `.lua`, `.xml`, `.toc`, `.ttf`, and anything with an
+  unfamiliar extension (carried through and flagged rather than dropped).
+  `--no-copy-unconverted` turns this off.
+- **Skipped, with the actual reason** — `.db2` client databases (3.3.5a reads
+  `.dbc`, and converting between them needs per-table schemas this tool does
+  not carry), `.tex` streamed texture payloads, `.phys` physics rigs, `.bone`
+  overrides, `.wdl` low-resolution heightmaps. `.skel` files are skipped
+  because they are merged into the model that references them.
+
+Nothing is silently discarded.
+
+## Reading a game install
+
+Point `--casc` at the folder containing the game executable and its `Data`
+directory, and select what you want by in-game path:
+
+```bash
+# Everything under one creature directory
+wotlkconv convert --casc "C:\World of Warcraft" -l listfile.csv \
+                  --include "creature/bear/**" -o out/
+
+# Every model in the build, four processes
+wotlkconv convert --casc /games/wow -l listfile.csv \
+                  --include "**/*.m2" -o out/ -j4
+
+# A specific file, no listfile needed
+wotlkconv convert --casc /games/wow --fileid 1394967 -o out/
+
+# What build is this, and what is in it?
+wotlkconv casc info --casc /games/wow
+wotlkconv casc list --casc /games/wow -l listfile.csv --include "world/wmo/**"
+
+# Pull files out without converting them
+wotlkconv casc extract --casc /games/wow -l listfile.csv \
+                       --include "sound/**" -o raw/
+```
+
+Selection is deliberately explicit: `--include "**"` takes the whole build, and
+a modern build is millions of files.
+
+Only **local** storage is read. Modern installs can be partial, streaming the
+rest from Blizzard's CDN on demand; files that are not on disk are reported as
+unavailable rather than downloaded. Encrypted files (Blizzard ships unreleased
+content that way) decode if you pass `--casc-keys` a community key ring, and
+are reported per file if you do not.
+
+`--casc-product` picks between products in a multi-product install
+(`wow`, `wow_classic`, `wowt`, …) and `--casc-locale` chooses which localised
+variant to prefer.
 
 ## Install
 
@@ -69,9 +129,10 @@ yourself. `--unresolved fail` turns that into an error instead, and
 ## Usage
 
 ```
-wotlkconv convert IN... -o OUT   downgrade assets
+wotlkconv convert IN... -o OUT   downgrade assets (from disk, or --casc)
 wotlkconv inspect FILE...        what is this file, and will 3.3.5a load it?
 wotlkconv plan IN...             what would a convert run do?
+wotlkconv casc info|list|extract read a game install
 wotlkconv listfile PATH          sanity-check a listfile
 ```
 
@@ -112,6 +173,9 @@ Bear.m2  [m2]  184320 bytes
 
 | Flag | Effect |
 |---|---|
+| `--casc DIR` | read a game install directly |
+| `--include GLOB` / `--fileid N` | what to take out of it (repeatable) |
+| `--casc-keys PATH` | TACT key ring for encrypted files |
 | `-l, --listfile PATH` | FileDataID → path mapping |
 | `-s, --search-dir DIR` | extra place to look for skins, skeletons and animations |
 | `--path-prefix PATH` | prefix every rewritten path, e.g. `custom\mypatch` |
@@ -124,6 +188,7 @@ Bear.m2  [m2]  184320 bytes
 | `--strict` | treat exceeding a 3.3.5a soft limit as an error |
 | `-j N` | convert N files in parallel |
 | `-n, --dry-run` | convert but write nothing |
+| `--no-copy-unconverted` | drop sound/interface files instead of copying them |
 
 ## Downgrading is lossy, and it says so
 
@@ -192,21 +257,26 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 176 tests, no network or game data needed
+python -m pytest tests/ -q      # 235 tests, no network or game data needed
 python -m ruff check src tests
 ```
 
-The tests build synthetic assets that match the modern wire formats
-byte for byte (`tests/fixtures.py`) and push them through the real converters.
-The M2 fixtures serialise through the production writer with version-272
-schemas, so the parser and writer cannot drift apart without a test failing.
+The tests build synthetic assets that match the modern wire formats byte for
+byte (`tests/fixtures.py`), and a complete synthetic CASC install — archives,
+indices, encoding and root tables and all (`tests/casc_fixtures.py`) — then push
+them through the real converters. The M2 fixtures serialise through the
+production writer with version-272 schemas, so the parser and writer cannot
+drift apart without a test failing. The ciphers are checked against published
+test vectors.
 
 **What that does and does not prove.** The test suite verifies structure:
 struct sizes against the documented wire formats, offsets that resolve to the
 chunks they claim, references that survive a round trip, and features that get
-clamped to the documented 3.3.5a ranges. It does not run a 3.3.5a client.
-Before shipping converted assets, load them in one. If something renders wrong,
-the `--report` JSON tells you which transformation touched it.
+clamped to the documented 3.3.5a ranges. It does not run a 3.3.5a client, and
+the CASC reader has not been run against a real retail install — only against
+fixtures built from the format description. Before shipping converted assets,
+load them in a client. If something renders wrong, the `--report` JSON tells
+you which transformation touched it.
 
 A few places where the published format documentation is ambiguous are called
 out explicitly in [`docs/formats.md`](docs/formats.md#assumptions) — those are
