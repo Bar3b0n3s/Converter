@@ -18,6 +18,10 @@ TARGET_BUILD = 12340
 # M2
 # ---------------------------------------------------------------------------
 M2_VERSION = 264  # 0x108 -- the only MD20 version 3.3.5a loads
+#: The highest MD20 version whose struct layout this tool has been written
+#: against.  Anything above it is read with the newest schemas available,
+#: which is a guess worth saying out loud.
+M2_VERSION_NEWEST_KNOWN = 274
 M2_MAGIC = "MD20"
 #: Legion+ wraps that body in an "MD21" chunk, which must be unwrapped; the
 #: chunk names live in wotlkconv.m2.model.KNOWN_M2_CHUNKS.
@@ -115,6 +119,10 @@ BLP_SOFT_MAX_DIMENSION = 1024
 # WMO
 # ---------------------------------------------------------------------------
 WMO_VERSION = 17
+#: Versions below this are a different format rather than an older one: the
+#: alpha WMO wraps its groups in a MOMO container and shares almost nothing
+#: with v17 beyond the magic.
+WMO_VERSION_OLDEST_READABLE = 17
 #: Chunks the 3.3.5a root parser knows. Anything else is skipped by the client
 #: at best and mis-parsed at worst, so the converter drops them.
 WMO_ROOT_CHUNKS_KNOWN = (

@@ -130,6 +130,30 @@ def _collect(data: bytes, name: str) -> tuple[dict[str, list[Chunk]], list[Chunk
     return named, mcnks
 
 
+def _check_version(named: dict[str, list[Chunk]], source: str,
+                   res: FileResult, what: str) -> int:
+    """MVER has read 18 since Wrath; say so if this file disagrees.
+
+    Nothing downstream branches on it, which is exactly why it is worth
+    reading: a file declaring something else is being parsed on an assumption
+    nobody checked.
+    """
+    entries = named.get("MVER")
+    if not entries or len(entries[0].data) < 4:
+        res.warn("adt.no_version",
+                 f"{what} has no readable MVER chunk; it was parsed as "
+                 f"version {ADT_VERSION} regardless")
+        return 0
+    version = struct.unpack_from("<I", entries[0].data, 0)[0]
+    if version != ADT_VERSION:
+        res.warn("adt.version",
+                 f"{what} declares MVER {version}, not the {ADT_VERSION} every "
+                 f"build from Wrath onwards writes; it was parsed as "
+                 f"{ADT_VERSION} anyway, so check the result",
+                 version=version)
+    return version
+
+
 def _payload(named: dict[str, list[Chunk]], key: str) -> bytes:
     entries = named.get(key)
     return entries[0].data if entries else b""
@@ -354,6 +378,7 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
 
     if "MHDR" not in root_named:
         raise UnsupportedFormatError(f"{source_name}: not an ADT (no MHDR chunk)")
+    _check_version(root_named, source_name, res, "terrain tile")
     if not root_mcnks:
         raise MalformedFileError(f"{source_name}: root ADT has no MCNK chunks")
 

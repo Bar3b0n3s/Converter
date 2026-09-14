@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 
 from ..limits import (
+    M2_VERSION_NEWEST_KNOWN,
     M2_BLEND_MODE_FALLBACK,
     M2_BONE_FLAG_MASK,
     M2_DEFAULT_FOV,
@@ -409,6 +410,24 @@ def strip_optional(model: M2Model, opts: Options, result: FileResult) -> None:
         model.lights = []
 
 
+def report_version(model: M2Model, result: FileResult) -> None:
+    """Say when a model is newer than any layout this tool was written for.
+
+    The M2Sequence struct is 64 bytes in both eras, so the array is walked
+    correctly either way and only the blend-time fields could be misread --
+    a contained error, but a silent one, so it is named.
+    """
+    if model.version > M2_VERSION_NEWEST_KNOWN:
+        result.warn("m2.version.newer",
+                    f"M2 version {model.version} is newer than {M2_VERSION_NEWEST_KNOWN}, "
+                    f"the newest this tool has layouts for; it was read with "
+                    f"those, which is right unless Blizzard changed a struct "
+                    f"since. Cameras and particles are checked as they parse, "
+                    f"but a changed M2Sequence would show up as wrong "
+                    f"animation blend times",
+                    version=model.version)
+
+
 def report_dropped_chunks(model: M2Model, result: FileResult) -> None:
     dropped: list[str] = []
     unknown: list[str] = []
@@ -480,6 +499,7 @@ def downgrade_model(model: M2Model, opts: Options, listfile: Listfile,
     downgrade_ribbons(model, opts, result)
     strip_optional(model, opts, result)
     clamp_flags(model, result)
+    report_version(model, result)
     report_dropped_chunks(model, result)
     validate(model, opts, result)
 

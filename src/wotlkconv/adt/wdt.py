@@ -109,6 +109,20 @@ def convert_wdt(data: bytes, source_name: str, opts: Options,
                  "the reference may have been a FileDataID this tool cannot "
                  "place in a name table")
 
+    mver = chunks.get("MVER")
+    if mver is None or len(mver.data) < 4:
+        res.warn("wdt.no_version",
+                 f"map index has no readable MVER chunk; it was parsed as "
+                 f"version {ADT_VERSION} regardless")
+    else:
+        version = struct.unpack_from("<I", mver.data, 0)[0]
+        if version != ADT_VERSION:
+            res.warn("wdt.version",
+                     f"map index declares MVER {version}, not the "
+                     f"{ADT_VERSION} every build from Wrath onwards writes; it "
+                     f"was parsed as {ADT_VERSION} anyway, so check the result",
+                     version=version)
+
     report_unknown(res, chunks, KNOWN, "map-index", "wdt.chunks.unknown")
 
     if modern:

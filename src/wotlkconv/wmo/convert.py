@@ -17,6 +17,7 @@ from ..limits import (
     WMO_MAX_GROUPS,
     WMO_MAX_SHADER,
     WMO_VERSION,
+    WMO_VERSION_OLDEST_READABLE,
 )
 from ..listfile import Listfile, normalise
 from ..options import Options, UnresolvedPolicy
@@ -236,10 +237,25 @@ def convert_wmo_root(data: bytes, source_name: str, opts: Options,
     res.source_version = (f"WMO root v{root.version}, {root.n_groups} groups, "
                           f"{len(root.chunks)} chunk kinds")
 
+    if root.version < WMO_VERSION_OLDEST_READABLE:
+        # The alpha WMO wraps its groups in a MOMO container and shares almost
+        # nothing with v17. Reading it as one would not fail, it would just be
+        # wrong, so it is refused instead.
+        res.fail("wmo.version.too_old",
+                 f"root declares version {root.version}; this tool reads "
+                 f"version {WMO_VERSION} and later. Versions below that are a "
+                 f"different layout wearing the same magic, and reading one as "
+                 f"v{WMO_VERSION} would produce a file that loads and renders "
+                 f"nonsense rather than failing",
+                 version=root.version)
+        res.elapsed = time.time() - started
+        return b"", res, []
     if root.version != WMO_VERSION:
         res.warn("wmo.version",
-                 f"root declares version {root.version}; 3.3.5a expects "
-                 f"{WMO_VERSION}", version=root.version)
+                 f"root declares version {root.version}, newer than the "
+                 f"{WMO_VERSION} this tool was written against; it was read as "
+                 f"v{WMO_VERSION}, which is right unless a structure changed",
+                 version=root.version)
     if root.n_groups > WMO_MAX_GROUPS:
         res.warn("wmo.limit.groups",
                  f"{root.n_groups} groups is far beyond anything 3.3.5a ships; "

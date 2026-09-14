@@ -148,6 +148,12 @@ def convert_wdl(data: bytes, source_name: str, opts: Options,
                if len(found.get("MVER", b"")) >= 4 else 0)
     res.source_version = f"WDL v{version}" + (" + LOD mesh" if any(
         n in MODERN_CHUNKS for n in order) else "")
+    if version != WDL_VERSION:
+        res.warn("wdl.version",
+                 f"heightmap declares MVER {version}, not the {WDL_VERSION} "
+                 f"every build from Wrath onwards writes; it was parsed as "
+                 f"{WDL_VERSION} anyway, so check the result",
+                 version=version)
 
     blocks = _tile_blocks(data, maof, source_name, res)
 
