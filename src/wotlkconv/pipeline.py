@@ -127,6 +127,17 @@ def _companion_names(kind: str, path: Path) -> set[str]:
     return set()
 
 
+def _merged(source: str, kind: str, why: str,
+            file_id: int | None = None) -> FileResult:
+    """Record a file another output already carries, so it is still counted."""
+    res = FileResult(source=source, kind=kind, status=Status.MERGED)
+    if file_id is None:
+        res.info("plan.merged", why)
+    else:
+        res.info("plan.merged", why, file_id=file_id)
+    return res
+
+
 def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
          claim_companions: bool = True, copy_unconverted: bool = True,
          convert_databases: bool = False
@@ -192,11 +203,14 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
 
     for _root, path, kind, rel, action, reason in pending:
         if claim_companions and kind in (detect.SKIN, detect.ANIM, detect.WMO_GROUP):
+            # A claimed companion is not dropped: the asset that references
+            # it converts it, under the name the client globs for, and emits
+            # its own result. Recording it here as well would count it twice.
             if path.name.lower() in claimed_names:
-                log.debug(f"skipping {rel}: converted as a companion")
+                log.debug(f"{rel}: converted by the asset that references it")
                 continue
             if path.stem.isdigit() and int(path.stem) in claimed_ids:
-                log.debug(f"skipping {rel}: converted as a companion "
+                log.debug(f"{rel}: converted by the asset that references it "
                           f"(FileDataID {path.stem})")
                 continue
         jobs.append(Job(kind=kind, source=path, relpath=rel, action=action))
@@ -215,6 +229,10 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
         extra = {k: v for k, v in parts.items() if k in ("tex0", "obj0")}
         jobs.append(Job(kind=detect.ADT, source=root_path,
                         relpath=os.path.relpath(root_path, anchor), extra=extra))
+        for part, path in sorted(extra.items()):
+            skipped.append(_merged(os.path.relpath(path, anchor), detect.ADT,
+                                   f"merged into {root_path.name} as the "
+                                   f"tile's _{part} piece"))
         # Pieces the merged tile has no room for still have to be accounted
         # for, or they would leave the run without ever being mentioned.
         for part, path in sorted(parts.items()):
@@ -335,9 +353,14 @@ def plan_casc(storage, listfile: Listfile, *, include: Sequence[str] = (),
             skipped.append(res)
             continue
         file_id, path = root_piece
+        merged_ids = {k: v[0] for k, v in pieces.items()
+                      if k in ("tex0", "obj0")}
         jobs.append(Job(kind=detect.ADT, relpath=to_posix(path), file_id=file_id,
-                        extra_ids={k: v[0] for k, v in pieces.items()
-                                   if k in ("tex0", "obj0")}))
+                        extra_ids=merged_ids))
+        for part in sorted(merged_ids):
+            skipped.append(_merged(pieces[part][1], detect.ADT,
+                                   f"merged into {path} as the tile's "
+                                   f"_{part} piece", pieces[part][0]))
         for part, (piece_id, piece_path) in sorted(pieces.items()):
             if part in ("root", "tex0", "obj0"):
                 continue

@@ -14,6 +14,7 @@ from wotlkconv.cli import main
 from wotlkconv.listfile import Listfile
 from wotlkconv.options import Options
 from wotlkconv.pipeline import plan, run
+from wotlkconv.report import Status
 
 
 @pytest.fixture
@@ -59,7 +60,35 @@ def test_plan_classifies_every_input(extraction):
     jobs, skipped = plan([extraction])
     kinds = sorted(j.kind for j in jobs)
     assert kinds == [detect.ADT, detect.BLP, detect.BLP, detect.M2, detect.WMO_ROOT]
-    assert [s.kind for s in skipped] == ["skel"]
+    # A .skel is the only thing here 3.3.5a has no place for on its own.
+    truly_skipped = [s.kind for s in skipped if s.status is Status.SKIPPED]
+    assert truly_skipped == ["skel"]
+
+
+def test_every_input_file_is_accounted_for(extraction, tmp_path):
+    """Nothing may leave a run without being mentioned somewhere."""
+    on_disk = sum(1 for p in extraction.rglob("*") if p.is_file())
+    report, _files = convert_tree(extraction, tmp_path / "out")
+    assert report.accounting()["inputs"] == on_disk
+
+
+def test_a_terrain_piece_folded_into_its_tile_is_recorded_as_merged(extraction):
+    """Nothing else reports it: the tile is written as a single file."""
+    _jobs, skipped = plan([extraction])
+    merged = [s for s in skipped if s.status is Status.MERGED]
+    assert {s.kind for s in merged} == {detect.ADT}
+    assert sorted(Path(s.source).name for s in merged) == [
+        "Azeroth_32_48_obj0.adt", "Azeroth_32_48_tex0.adt"]
+    assert all(s.notes[0].code == "plan.merged" for s in merged)
+
+
+def test_a_companion_is_reported_by_the_asset_that_converts_it(extraction,
+                                                               tmp_path):
+    """It is converted under the name the client globs for, and counted once."""
+    report, _files = convert_tree(extraction, tmp_path / "out")
+    sources = [f.source for f in report.files]
+    assert len(sources) == len(set(sources)), "a file was counted twice"
+    assert any(s.endswith("00.skin") for s in sources)
 
 
 def test_split_terrain_pieces_are_grouped(extraction):
@@ -518,16 +547,20 @@ def test_terrain_pieces_the_tile_cannot_hold_are_reported_not_dropped(tmp_path):
     src, maps = _terrain_tree(tmp_path)
     jobs, skipped = plan([src])
 
-    merged = sum(len(j.extra) for j in jobs)
-    accounted = len(jobs) + len(skipped) + merged
-    assert accounted == len(list(maps.iterdir())) == 6
+    assert len(jobs) + len(skipped) == len(list(maps.iterdir())) == 6
 
-    reasons = {Path(s.source).name: s.notes[0].message for s in skipped}
+    unused = [s for s in skipped if s.status is Status.SKIPPED]
+    reasons = {Path(s.source).name: s.notes[0].message for s in unused}
     assert set(reasons) == {"Az_1_1_tex1.adt", "Az_1_1_obj1.adt",
                             "Az_1_1_lod.adt"}
     assert "high-detail texture" in reasons["Az_1_1_tex1.adt"]
     assert "LOD terrain mesh" in reasons["Az_1_1_lod.adt"]
-    assert all(s.notes[0].code == "adt.piece_unused" for s in skipped)
+    assert all(s.notes[0].code == "adt.piece_unused" for s in unused)
+
+    # and the two that were used say so rather than going unmentioned
+    merged = [Path(s.source).name for s in skipped
+              if s.status is Status.MERGED]
+    assert sorted(merged) == ["Az_1_1_obj0.adt", "Az_1_1_tex0.adt"]
 
 
 def test_the_tile_itself_is_still_merged_from_its_pieces(tmp_path):
@@ -535,3 +568,87 @@ def test_the_tile_itself_is_still_merged_from_its_pieces(tmp_path):
     jobs, _skipped = plan([src])
     assert len(jobs) == 1
     assert sorted(jobs[0].extra) == ["obj0", "tex0"]
+
+
+# ---------------------------------------------------------------------------
+# Nothing leaves a run unaccounted for
+# ---------------------------------------------------------------------------
+def _every_format_tree(tmp_path):
+    """One file of every kind this tool has an opinion about."""
+    import test_detect as D
+
+    src = tmp_path / "in"
+    (src / "world/maps/az").mkdir(parents=True)
+    (src / "creature/bear").mkdir(parents=True)
+
+    files = {}
+    # converted
+    model = F.build_modern_model()
+    files["creature/bear/bear.m2"] = F.serialise_modern_m2(model, skeleton_id=0)
+    files["creature/bear/bear00.skin"] = F.build_skin(legion=True)
+    files["creature/bear/bear.blp"] = F.build_blp(
+        F.build_gradient_image(8, 8))
+    files["world/wmo/house.wmo"] = F.build_modern_wmo_root(groups=1)
+    files["world/maps/az/az.wdl"] = F.build_wdl()
+    files["world/maps/az/az.wlw"] = F.build_liquid()
+    root, tex, obj = F.build_split_adt(chunks=4)
+    files["world/maps/az/az_1_1.adt"] = root
+    files["world/maps/az/az_1_1_tex0.adt"] = tex
+    files["world/maps/az/az_1_1_obj0.adt"] = obj
+    files["world/maps/az/az_1_1_lod.adt"] = D.chunked(
+        [("MVER", b"\0" * 4), ("MLHD", b"\0" * 16)])
+    files["world/maps/az/az_lgt.wdt"] = D.chunked(
+        [("MVER", b"\0" * 4), ("MPLT", b"\0" * 32)])
+    # copied and skipped, by signature
+    for kind, data in D.SIGNATURES.items():
+        files[f"misc/thing{D.detect.EXTENSIONS[kind]}"] = data
+    # and one nobody anticipated
+    files["misc/mystery.qqq"] = b"\x00\x11\x22\x33" * 8
+
+    for rel, data in files.items():
+        path = src / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return src, len(files)
+
+
+def test_every_file_of_every_kind_is_accounted_for(tmp_path):
+    """The whole point: a format nobody thought about cannot vanish."""
+    src, count = _every_format_tree(tmp_path)
+    jobs, skipped = plan([src])
+    out = tmp_path / "out"
+    report = run(jobs, Options(), Listfile(), out, roots=[str(src)],
+                 skipped=skipped)
+    books = report.accounting()
+    assert books["inputs"] == count
+    assert (books["written"] + books["merged"] + books["skipped"]
+            + books["failed"]) == count
+
+
+def test_the_accounting_survives_the_run_not_just_the_plan(tmp_path):
+    """Results come back from workers; the totals must still add up."""
+    src, count = _every_format_tree(tmp_path)
+    jobs, skipped = plan([src])
+    report = run(jobs, Options(), Listfile(), tmp_path / "out",
+                 roots=[str(src)], skipped=skipped)
+    assert len(report.files) == count
+    assert len({id(f) for f in report.files}) == count   # no duplicates
+
+
+def test_every_skipped_file_says_why(tmp_path):
+    src, _count = _every_format_tree(tmp_path)
+    _jobs, skipped = plan([src])
+    for result in skipped:
+        assert result.notes, f"{result.source} was skipped silently"
+        assert result.notes[0].message, f"{result.source} has an empty reason"
+
+
+def test_the_summary_states_the_accounting(tmp_path):
+    src, count = _every_format_tree(tmp_path)
+    jobs, skipped = plan([src])
+    report = run(jobs, Options(), Listfile(), tmp_path / "out",
+                 roots=[str(src)], skipped=skipped)
+    line = next(ln for ln in report.summary_lines()
+                if "every input accounted for" in ln)
+    numbers = [int(w) for w in line.replace(",", " ").split() if w.isdigit()]
+    assert sum(numbers) == count

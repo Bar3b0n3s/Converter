@@ -22,13 +22,16 @@ class Status(str, Enum):
     LOSSY = "lossy"
     #: Already a valid 3.3.5a asset; copied through unchanged.
     PASSTHROUGH = "passthrough"
+    #: Not converted on its own because another output already carries it --
+    #: a model's skins, a WMO's groups, a tile's _tex0 and _obj0 pieces.
+    MERGED = "merged"
     SKIPPED = "skipped"
     FAILED = "failed"
 
 
 #: Severity ordering used when folding note levels into a file status.
-_RANK = {Status.OK: 0, Status.PASSTHROUGH: 0, Status.SKIPPED: 1,
-         Status.LOSSY: 2, Status.FAILED: 3}
+_RANK = {Status.OK: 0, Status.PASSTHROUGH: 0, Status.MERGED: 0,
+         Status.SKIPPED: 1, Status.LOSSY: 2, Status.FAILED: 3}
 
 
 @dataclasses.dataclass(slots=True)
@@ -143,6 +146,23 @@ class Report:
     def lossy(self) -> list[FileResult]:
         return [f for f in self.files if f.status is Status.LOSSY]
 
+    def accounting(self) -> dict[str, int]:
+        """Where every input file ended up.
+
+        The point of this is that it adds up: a run that read N files reports
+        N files, so a format nobody thought about cannot quietly disappear
+        between the planner and the output.
+        """
+        counts = self.counts()
+        return {
+            "inputs": len(self.files),
+            "written": sum(counts.get(s.value, 0) for s in
+                           (Status.OK, Status.LOSSY, Status.PASSTHROUGH)),
+            "merged": counts.get(Status.MERGED.value, 0),
+            "skipped": counts.get(Status.SKIPPED.value, 0),
+            "failed": counts.get(Status.FAILED.value, 0),
+        }
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "tool": "wotlkconv",
@@ -151,6 +171,7 @@ class Report:
             "finished": self.finished,
             "elapsed_s": round((self.finished or time.time()) - self.started, 3),
             "counts": self.counts(),
+            "accounting": self.accounting(),
             "files": [f.as_dict() for f in self.files],
         }
 
@@ -167,6 +188,12 @@ class Report:
                  if counts.get(s.value)]
         lines = [f"{total} file(s): " + ", ".join(parts) if parts
                  else f"{total} file(s)"]
+        books = self.accounting()
+        if books["merged"] or books["skipped"]:
+            lines.append(
+                f"  every input accounted for: {books['written']} written, "
+                f"{books['merged']} carried by another file, "
+                f"{books['skipped']} skipped, {books['failed']} failed")
         for f in self.files:
             if f.status is Status.FAILED:
                 for n in f.notes:
