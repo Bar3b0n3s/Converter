@@ -181,3 +181,45 @@ def test_a_non_adt_is_rejected(listfile):
     cw.add("MVER", struct.pack("<I", 18))
     with pytest.raises(UnsupportedFormatError):
         convert_adt(AdtParts(cw.getvalue()), "t.adt", Options(), listfile)
+
+
+def test_path_prefix_reaches_the_terrain_texture_list(split_tile, listfile):
+    """--path-prefix has to rewrite MTEX too, or the tile references art that
+    is not where the rest of the converted set went."""
+    root, tex, obj = split_tile
+    out, _res = convert_adt(AdtParts(root, tex, obj), "t.adt",
+                            Options(path_prefix="custom\\mypatch"), listfile)
+    named, _ = read_tile(out)
+    paths = [p for p in named["MTEX"].data.split(b"\0") if p]
+    assert all(p.startswith(b"custom\\mypatch\\") for p in paths), paths
+
+
+def test_path_prefix_applies_to_an_existing_mtex(split_tile, listfile):
+    """A tile that already had MTEX (rather than MDID) gets prefixed too."""
+    root, tex, obj = split_tile
+    merged, _ = convert_adt(AdtParts(root, tex, obj), "t.adt", Options(), listfile)
+    out, _res = convert_adt(AdtParts(merged), "t.adt",
+                            Options(path_prefix="patch"), listfile)
+    named, _ = read_tile(out)
+    paths = [p for p in named["MTEX"].data.split(b"\0") if p]
+    assert paths and all(p.startswith(b"patch\\") for p in paths), paths
+
+
+def test_unresolved_terrain_textures_get_placeholders(split_tile):
+    from wotlkconv.listfile import Listfile
+    root, tex, obj = split_tile
+    out, res = convert_adt(AdtParts(root, tex, obj), "t.adt", Options(),
+                           Listfile())
+    named, _ = read_tile(out)
+    assert b"unresolved\\blp\\700001.blp" in named["MTEX"].data
+    assert any(n.code == "adt.texture.placeholder" for n in res.notes)
+
+
+def test_unresolved_terrain_textures_can_fail_the_tile(split_tile):
+    from wotlkconv.listfile import Listfile
+    from wotlkconv.options import UnresolvedPolicy
+    root, tex, obj = split_tile
+    out, res = convert_adt(AdtParts(root, tex, obj), "t.adt",
+                           Options(unresolved=UnresolvedPolicy.FAIL), Listfile())
+    assert res.status is Status.FAILED and out == b""
+    assert any(n.code == "adt.texture.unresolved" for n in res.notes)
