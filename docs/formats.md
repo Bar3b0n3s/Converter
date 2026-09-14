@@ -288,6 +288,12 @@ hoists constant columns into a side table, replaces repeated values with
 indices into a palette, and scatters records across sections that may be
 encrypted.
 
+Magics read: **WDC1** (Legion 7.3) through **WDC5** (The War Within). Earlier
+ones — `WDB2` to `WDB6`, Cataclysm through Legion 7.2 — are refused. They have
+no field-storage table and measure string offsets from the string block rather
+than from the field, so reading one as a WDC yields plausible wrong values
+instead of an error.
+
 Field storage types, all of which the reader handles:
 
 | Type | Meaning |
@@ -301,6 +307,19 @@ Field storage types, all of which the reader handles:
 
 Also handled: id lists (the id lives outside the record), copy tables (a row
 cloned under a new id), relationship columns, and sparse offset maps.
+
+A **sparse** table has no fixed-size record block: an offset map gives each
+present row a `(offset, size)` into a region of packed records whose strings are
+inline. Where the map sits differs by era — WDC2 points at it from the section
+header, WDC3 and later place it after the id list and copy table. Because that
+layout is easy to get wrong and a wrong read yields nonsense rather than an
+error, everything is checked: offsets must land inside the record region, the
+number of present rows must match the section header, and walking a record's
+columns must consume exactly the bytes the map allotted it. Any mismatch raises.
+
+A file whose header this reader has misjudged is caught the same way — the
+record block is checked against the file's actual length before any row is
+decoded.
 
 Note `contentFlags`, `localeFlags` and the record count in a root-style block
 are **unsigned** — reading `localeFlags` as signed makes `0xFFFFFFFF` ("every

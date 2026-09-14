@@ -71,12 +71,6 @@ SUPPORTED_BLOCK_FORMATS = (PreferredFormat.DXT1, PreferredFormat.DXT3,
                            PreferredFormat.DXT5)
 
 
-def block_bytes_for(alpha_type: int) -> int:
-    if alpha_type == PreferredFormat.DXT1:
-        return 8
-    return 16
-
-
 @dataclasses.dataclass(slots=True)
 class Blp:
     width: int
@@ -240,9 +234,6 @@ class Blp:
                         break
                     out[i * 4 + 3] = 255 if (payload[byte_i] >> (i & 7)) & 1 else 0
         return Image(w, h, out)
-
-    def decode_all(self, reconstruct_normal_z: bool = True) -> list[Image]:
-        return [self.decode_level(i, reconstruct_normal_z) for i in range(len(self.mips))]
 
     # -- construction ---------------------------------------------------
     @classmethod

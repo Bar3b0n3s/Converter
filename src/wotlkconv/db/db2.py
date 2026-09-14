@@ -14,11 +14,15 @@ Supported magics:
 ``WDC4``     Dragonflight                   as WDC3
 ``WDC3``     BfA 8.2 .. Shadowlands         sections, 40-byte section header
 ``WDC2``     BfA 8.0                        sections, 36-byte section header
-``WDC1``     Legion 7.3                     bitpacking, no sections
-``WDB6``     Legion 7.2                     flat records plus common data
-``WDB5``     Legion 7.0                     flat records
-``WDB2``     Cataclysm .. Warlords          flat records
+``WDC1``     Legion 7.3                     bitpacking, one implicit section
 ===========  =============================  ===================================
+
+Earlier magics (``WDB2`` through ``WDB6``, Cataclysm to Legion 7.2) are
+refused rather than read. They lay their records out differently enough --
+no field-storage table, and string offsets measured from the string block
+rather than from the field -- that reading one as if it were a WDC would
+produce plausible-looking wrong values instead of an error. Every build that
+ships assets this tool converts uses WDC1 or later.
 
 Column names, types and array sizes come from a DBD definition matched on the
 file's own layout hash; without one the columns are still readable, just
@@ -35,12 +39,6 @@ from .. import log
 from ..errors import MalformedFileError, UnsupportedFormatError
 from . import dbd
 from .bits import as_float, read_bits, sign_extend
-
-#: Header size after the magic, for each supported family.
-WDC3_BODY = 68
-WDC1_BODY = 72
-WDB5_BODY = 44
-WDB2_BODY = 44
 
 FIELD_STORAGE_INFO_SIZE = 24
 
@@ -198,8 +196,13 @@ def _read_header(data: bytes, name: str) -> tuple[dict, _Cursor, str]:
     if magic == "WDC5":
         header["version"] = cursor.u32()
         header["schema"] = cursor.raw(128).split(b"\0", 1)[0].decode("latin-1")
-    elif magic not in ("WDC4", "WDC3", "WDC2", "1SLC", "WDC1",
-                       "WDB6", "WDB5", "WDB4", "WDB3", "WDB2"):
+    elif magic in ("WDB2", "WDB3", "WDB4", "WDB5", "WDB6"):
+        raise UnsupportedFormatError(
+            f"{name}: {magic} is a Cataclysm-to-Legion-7.2 database. Its "
+            f"records are laid out differently enough from the WDC formats "
+            f"that reading one here would produce wrong values rather than an "
+            f"error, so it is refused. This tool reads WDC1 and later")
+    elif magic not in ("WDC4", "WDC3", "WDC2", "1SLC", "WDC1"):
         raise UnsupportedFormatError(
             f"{name}: not a client database (magic {magic!r})")
 
@@ -208,36 +211,11 @@ def _read_header(data: bytes, name: str) -> tuple[dict, _Cursor, str]:
     header["record_size"] = cursor.u32()
     header["string_table_size"] = cursor.u32()
 
-    if magic in ("WDB2", "WDB3", "WDB4"):
-        header["table_hash"] = cursor.u32()
-        header["build"] = cursor.u32()
-        header["timestamp"] = cursor.u32()
-        header["min_id"] = cursor.u32()
-        header["max_id"] = cursor.u32()
-        header["locale"] = cursor.u32()
-        header["copy_table_size"] = cursor.u32()
-        header["layout_hash"] = 0
-        header["flags"] = 0
-        header["id_index"] = 0
-        header["total_field_count"] = header["field_count"]
-        header["section_count"] = 1
-        return header, cursor, magic
-
     header["table_hash"] = cursor.u32()
     header["layout_hash"] = cursor.u32()
     header["min_id"] = cursor.u32()
     header["max_id"] = cursor.u32()
     header["locale"] = cursor.u32()
-
-    if magic in ("WDB5", "WDB6"):
-        header["copy_table_size"] = cursor.u32()
-        header["flags"] = cursor.u16()
-        header["id_index"] = cursor.u16()
-        header["total_field_count"] = (cursor.u32() if magic == "WDB6"
-                                       else header["field_count"])
-        header["common_data_size"] = cursor.u32() if magic == "WDB6" else 0
-        header["section_count"] = 1
-        return header, cursor, magic
 
     if magic == "WDC1":
         header["copy_table_size"] = cursor.u32()
@@ -363,8 +341,17 @@ def parse_db2(data: bytes, name: str = "<db2>",
     if sectioned:
         sections = _read_sections(cursor, magic, header["section_count"])
     else:
-        sections = [Section(file_offset=0, record_count=header["record_count"],
-                            string_table_size=header["string_table_size"])]
+        # WDC1 has no section table: the one implicit section's sizes live in
+        # the header. Without this its id list, copy table and relationship
+        # data would all be skipped.
+        sections = [Section(
+            file_offset=0,
+            record_count=header["record_count"],
+            string_table_size=header["string_table_size"],
+            id_list_size=(header["record_count"] * 4
+                          if header.get("flags", 0) & FLAG_NON_INLINE_IDS else 0),
+            copy_table_size=header.get("copy_table_size", 0),
+            relationship_data_size=header.get("relationship_data_size", 0))]
 
     # -- field structures (widths and byte positions) -------------------
     field_structs = []
@@ -376,12 +363,9 @@ def parse_db2(data: bytes, name: str = "<db2>",
     storages: list[FieldStorage] = []
     pallet_data = b""
     common_data = b""
-    if magic in ("WDC1", "WDC2", "1SLC", "WDC3", "WDC4", "WDC5"):
-        storages = _read_storage_info(cursor, header.get("field_storage_info_size", 0))
-        pallet_data = cursor.raw(header.get("pallet_data_size", 0))
-        common_data = cursor.raw(header.get("common_data_size", 0))
-    elif magic == "WDB6":
-        common_data = b""  # WDB6 common data follows the copy table; rare
+    storages = _read_storage_info(cursor, header.get("field_storage_info_size", 0))
+    pallet_data = cursor.raw(header.get("pallet_data_size", 0))
+    common_data = cursor.raw(header.get("common_data_size", 0))
 
     # -- columns --------------------------------------------------------
     layout = None
@@ -421,6 +405,11 @@ def parse_db2(data: bytes, name: str = "<db2>",
 
     caches = _StorageCaches(pallet_data, common_data, storages)
 
+    if not sectioned:
+        # Flat formats put the records straight after the header area.
+        sections[0].file_offset = cursor.pos
+    _check_sections(data, table, sections, header, name)
+
     # -- sections -------------------------------------------------------
     for section in sections:
         if section.encrypted:
@@ -437,6 +426,31 @@ def parse_db2(data: bytes, name: str = "<db2>",
                       caches, field_structs, id_column, name)
 
     return table
+
+
+def _check_sections(data: bytes, table: Db2Table, sections: list[Section],
+                    header: dict, name: str) -> None:
+    """Refuse a file whose own header does not describe something that fits.
+
+    A header layout this reader has misjudged produces offsets that run past
+    the end of the file. Catching that here turns a silent wrong-data read into
+    an error naming the file.
+    """
+    if header.get("flags", 0) & FLAG_SPARSE:
+        return
+    for section in sections:
+        if section.encrypted:
+            continue
+        needed = (section.file_offset
+                  + section.record_count * table.record_size
+                  + section.string_table_size)
+        if needed > len(data):
+            raise MalformedFileError(
+                f"{name}: a {table.magic} section claims "
+                f"{section.record_count} records of {table.record_size} bytes "
+                f"plus {section.string_table_size} bytes of strings from "
+                f"offset {section.file_offset}, which needs {needed} bytes but "
+                f"the file is {len(data)}")
 
 
 class _StorageCaches:
@@ -508,7 +522,7 @@ def _read_section(data: bytes, table: Db2Table, section: Section, header: dict,
     for index in range(count):
         if record_blobs is not None:
             blob, row_id = record_blobs[index]
-            values = _decode_sparse_record(blob, inline, storages)
+            values = _decode_sparse_record(blob, inline, storages, name)
         else:
             start = index * record_size
             blob = record_data[start : start + record_size]
@@ -546,24 +560,77 @@ def _read_section(data: bytes, table: Db2Table, section: Section, header: dict,
 def _read_sparse_records(data: bytes, table: Db2Table, section: Section,
                          header: dict, magic: str,
                          name: str) -> list[tuple[bytes, int]]:
-    """Variable-length records addressed by an ``(offset, size)`` map."""
-    span = table.max_id - table.min_id + 1
-    if span <= 0 or span > 5_000_000:
+    """Read a sparse section's variable-length records.
+
+    A sparse table stores no fixed-size record block. Instead an offset map
+    gives each present row a ``(offset, size)`` into a region of packed records
+    whose strings are inline. Where that map sits differs by era: WDC2 points
+    at it directly from the section header, while WDC3 and later place it after
+    the id list and copy table and give its length separately.
+
+    Everything read here is checked against the region it should fall in, and
+    :func:`_decode_sparse_record` checks that walking a record's columns
+    consumes exactly the bytes the map allotted it. A layout this reader has
+    misjudged therefore fails loudly instead of yielding plausible nonsense.
+    """
+    region_start = section.file_offset
+    region_end = section.offset_records_end or len(data)
+
+    if magic in ("WDC2", "1SLC"):
+        map_offset = section.offset_map_offset
+        count = table.max_id - table.min_id + 1
+        id_list_offset = 0
+    else:
+        cursor = region_end
+        cursor += section.id_list_size
+        cursor += (section.copy_table_count or 0) * 8
+        map_offset = cursor
+        count = section.offset_map_id_count or (table.max_id - table.min_id + 1)
+        # WDC3 keeps the row ids in their own list after the relationship data.
+        id_list_offset = (map_offset + count * 6 + section.relationship_data_size
+                          if section.offset_map_id_count else 0)
+
+    if count <= 0 or count > 5_000_000:
         raise MalformedFileError(
-            f"{name}: sparse table claims ids {table.min_id}..{table.max_id}")
-    map_offset = (section.offset_map_offset if magic in ("WDC2", "1SLC")
-                  else section.offset_records_end)
+            f"{name}: sparse section claims {count} offset map entries")
+    if map_offset <= 0 or map_offset + count * 6 > len(data):
+        raise MalformedFileError(
+            f"{name}: sparse offset map of {count} entries at {map_offset} does "
+            f"not fit the file ({len(data)} bytes); this reader has the "
+            f"{magic} sparse layout wrong for this build")
+
+    ids: list[int] = []
+    if id_list_offset and id_list_offset + count * 4 <= len(data):
+        ids = list(struct.unpack_from("<" + "I" * count, data, id_list_offset))
+
     blobs: list[tuple[bytes, int]] = []
-    for i in range(span):
+    for i in range(count):
         offset, size = struct.unpack_from("<IH", data, map_offset + i * 6)
-        if size:
-            blobs.append((data[offset : offset + size], table.min_id + i))
+        if size == 0:
+            continue
+        if offset < region_start or offset + size > region_end:
+            raise MalformedFileError(
+                f"{name}: sparse record {i} claims {size} bytes at {offset}, "
+                f"outside the record region {region_start}..{region_end}")
+        row_id = ids[i] if i < len(ids) else table.min_id + i
+        blobs.append((data[offset : offset + size], row_id))
+
+    if section.record_count and len(blobs) != section.record_count:
+        raise MalformedFileError(
+            f"{name}: sparse offset map yielded {len(blobs)} records but the "
+            f"section header says {section.record_count}")
     return blobs
 
 
 def _decode_sparse_record(blob: bytes, inline: list[dbd.Column],
-                          storages: list[FieldStorage]) -> dict[str, Any]:
-    """Sparse records are byte-aligned with strings stored inline."""
+                          storages: list[FieldStorage],
+                          name: str = "<db2>") -> dict[str, Any]:
+    """Walk a sparse record's columns; strings are inline and NUL-terminated.
+
+    The walk must land exactly on the end of the record. Falling short or
+    running over means the column list does not match the record, which is
+    treated as an error rather than quietly returning whatever was read.
+    """
     values: dict[str, Any] = {}
     pos = 0
     for index, column in enumerate(inline):
@@ -575,14 +642,26 @@ def _decode_sparse_record(blob: bytes, inline: list[dbd.Column],
             if column.is_string:
                 end = blob.find(b"\0", pos)
                 if end < 0:
-                    end = len(blob)
+                    raise MalformedFileError(
+                        f"{name}: an inline string in a sparse record is not "
+                        f"terminated")
                 items.append(blob[pos:end].decode("latin-1"))
                 pos = end + 1
             else:
+                if pos + size > len(blob):
+                    raise MalformedFileError(
+                        f"{name}: column {column.name!r} runs past the end of "
+                        f"its {len(blob)}-byte sparse record")
                 raw = int.from_bytes(blob[pos : pos + size], "little")
                 pos += size
                 items.append(_coerce(raw, column, storage))
         values[column.name] = items[0] if column.array_size == 1 else items
+
+    # Records are padded to a whole number of bytes, never by more than three.
+    if not 0 <= len(blob) - pos <= 3:
+        raise MalformedFileError(
+            f"{name}: walking a sparse record's columns consumed {pos} of its "
+            f"{len(blob)} bytes; the definition does not match this table")
     return values
 
 

@@ -33,7 +33,7 @@ wotlkconv convert --casc "C:\World of Warcraft" --include "creature/**" \
 | `.wmo` group | Shadowlands `MOVX`/`MPY2` | `MOVI`/`MOPY` | recomputes batch bounds, trims UV/colour layers |
 | `.adt` | Cataclysm+ split tiles | monolithic Wrath tile | rebuilds `MCIN`, merges `_tex0` and `_obj0` |
 | `.wdt` | BfA+ with `MAID` | 3.3.5a v17 | drops `MAID`, sets the big-alpha flag |
-| `.db2` | WDC1–WDC5, WDB2/5/6 | `.dbc` | needs a DBD definition and a per-table mapping |
+| `.db2` | WDC1–WDC5 (Legion 7.3 onwards) | `.dbc` | needs a DBD definition and a per-table mapping |
 
 Companion files are found automatically and renamed into the layout the client
 globs for — `Bear.m2` gets `Bear00.skin` … `Bear03.skin` and
@@ -86,6 +86,11 @@ wotlkconv db convert CreatureDisplayInfo.db2 -o out/ \
 Merging keeps the template's records and string block byte for byte and appends
 to them, so existing string offsets stay valid and the tool never has to guess
 the type of a field it is not writing.
+
+Databases older than WDC1 (Cataclysm through Legion 7.2) are **refused rather
+than read**: they lay records out differently enough that reading one as a WDC
+would produce plausible wrong values instead of an error. Every build that
+ships assets worth converting is WDC1 or later.
 
 `wotlkconv db tables` lists the built-in mappings. They are plain JSON —
 `--db-mappings DIR` overrides any of them, and adding a table means writing one
@@ -318,7 +323,7 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 314 tests, no network or game data needed
+python -m pytest tests/ -q      # 346 tests, no network or game data needed
 python -m ruff check src tests
 ```
 

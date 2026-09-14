@@ -69,11 +69,6 @@ def _blocks(width: int, height: int) -> tuple[int, int]:
     return (width + 3) // 4, (height + 3) // 4
 
 
-def block_data_size(width: int, height: int, block_bytes: int) -> int:
-    bw, bh = _blocks(width, height)
-    return bw * bh * block_bytes
-
-
 def _decode_blocks(data: bytes, width: int, height: int, block_bytes: int,
                    decode_block) -> bytearray:
     """Shared driver: walk 4x4 blocks and splat them into an RGBA buffer."""
@@ -152,19 +147,6 @@ def _decode_bc4_block(src: bytes, off: int, out: list) -> None:
     bits = int.from_bytes(src[off + 2 : off + 8], "little")
     for i in range(16):
         out[i] = pal[(bits >> (3 * i)) & 7]
-
-
-def decode_bc4(data: bytes, width: int, height: int) -> bytearray:
-    """Single-channel BC4 -> RGBA greyscale (value replicated, alpha 255)."""
-    vals = [0] * 16
-
-    def blk(src: bytes, off: int, texels: list) -> None:
-        _decode_bc4_block(src, off, vals)
-        for i in range(16):
-            v = vals[i]
-            texels[i] = (v, v, v, 255)
-
-    return _decode_blocks(data, width, height, 8, blk)
 
 
 def decode_bc5(data: bytes, width: int, height: int,

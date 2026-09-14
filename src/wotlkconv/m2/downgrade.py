@@ -30,6 +30,7 @@ from ..limits import (
     M2_EMITTER_TYPES_SUPPORTED,
     M2_GLOBAL_FLAG_MASK,
     M2_MATERIAL_FLAG_MASK,
+    M2_MAX_BLEND_MODE,
     M2_MAX_PARTICLE_BLEND_MODE,
     M2_MAX_SKIN_PROFILES,
     M2_MAX_TEXTURE_TYPE,
@@ -380,7 +381,7 @@ def clamp_flags(model: M2Model, result: FileResult) -> None:
         if blend in M2_BLEND_MODE_FALLBACK:
             mat["blending_mode"] = M2_BLEND_MODE_FALLBACK[blend]
             mats_blend += 1
-        elif blend > 6:
+        elif blend > M2_MAX_BLEND_MODE:
             mat["blending_mode"] = 2  # plain alpha is the safe default
             mats_blend += 1
     if mats_flags:

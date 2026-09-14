@@ -67,6 +67,7 @@ works because live Blizzard data never went that far.
 
 | Limit | Value | Kind |
 |---|---|---|
+| Readable `.db2` magics | WDC1 .. WDC5 | hard — older ones refused |
 | DBC field width | 4 bytes, always | hard |
 | Field types | int, uint, float, string offset | hard — not stored in the file |
 | Model path spelling | `.mdx`, not `.m2` | hard — the client swaps it back |

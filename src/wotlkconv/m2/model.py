@@ -79,9 +79,6 @@ class AnimFileRef:
     sub_anim_id: int
     file_id: int
 
-    def wotlk_suffix(self) -> str:
-        """The ``0000-00`` part of a 3.3.5a ``.anim`` filename."""
-        return f"{self.anim_id:04d}-{self.sub_anim_id:02d}"
 
 
 @dataclasses.dataclass

@@ -98,6 +98,30 @@ def test_halving_a_uniform_image_is_lossless():
     assert set(img.halve().data) == {10, 20, 30, 40}
 
 
+def test_upscaling_interpolates_rather_than_repeating():
+    img = Image.new(2, 2)
+    for i, colour in enumerate(((0, 0, 0, 255), (255, 0, 0, 255),
+                                (0, 255, 0, 255), (255, 255, 0, 255))):
+        img.data[i * 4:(i + 1) * 4] = bytes(colour)
+    big = img.resize(8, 8)
+    assert (big.width, big.height) == (8, 8)
+    row = [big.data[(4 * 8 + x) * 4] for x in range(8)]
+    assert row == sorted(row)          # left-to-right ramp, not a step
+    assert len(set(row)) > 2           # values in between, not just 0 and 255
+
+
+def test_resizing_to_the_same_size_copies():
+    img = F.build_gradient_image(8, 8)
+    assert img.resize(8, 8).data == img.data
+
+
+def test_mixed_resize_shrinks_one_axis_and_grows_the_other():
+    img = F.build_gradient_image(16, 4)
+    out = img.resize(8, 16)
+    assert (out.width, out.height) == (8, 16)
+    assert len(out.data) == 8 * 16 * 4
+
+
 def test_bgra_round_trip_swaps_channels_back():
     img = F.build_gradient_image(8, 8)
     assert Image.from_bgra(8, 8, img.to_bgra()).data == img.data

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import struct
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 from ..errors import MalformedFileError, UnsupportedFormatError
 
@@ -219,6 +219,3 @@ def inspect_dbc(data: bytes, source_name: str) -> dict:
     }
 
 
-def sorted_rows(rows: Iterable[Sequence[Any]]) -> list:
-    """Client lookups assume ascending ids; keep tables sorted."""
-    return sorted(rows, key=lambda r: r[0])

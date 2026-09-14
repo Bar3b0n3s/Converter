@@ -39,10 +39,6 @@ class Reader:
     def __len__(self) -> int:
         return len(self.data)
 
-    @property
-    def remaining(self) -> int:
-        return len(self.data) - self.pos
-
     def seek(self, pos: int) -> "Reader":
         self.pos = pos
         return self

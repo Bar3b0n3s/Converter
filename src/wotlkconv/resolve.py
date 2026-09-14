@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 from . import log
 from .listfile import Listfile, to_posix
@@ -132,13 +132,3 @@ class AssetSource:
         return lambda fid: self.by_file_id(fid, extension)
 
 
-def sibling_roots(path: str | os.PathLike[str],
-                  extra: Iterable[str | os.PathLike[str]] = ()) -> list[Path]:
-    """Default search roots for a file: its own directory, then any extras."""
-    p = Path(path)
-    roots = [p.parent if p.is_file() or p.suffix else p]
-    for e in extra:
-        ep = Path(e)
-        if ep not in roots:
-            roots.append(ep)
-    return roots

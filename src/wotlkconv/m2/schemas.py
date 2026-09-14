@@ -15,6 +15,8 @@ M2Particle       476 bytes                  492 bytes (+multi-texture)
 
 from __future__ import annotations
 
+from ..limits import (M2_CAMERA_SIZE_LEGION, M2_CAMERA_SIZE_WOTLK,
+                      M2_PARTICLE_SIZE_CATA, M2_PARTICLE_SIZE_WOTLK)
 from .types import Schema
 
 # ---------------------------------------------------------------------------
@@ -274,10 +276,10 @@ _EXPECTED_SIZES = {
     "RIBBON": (RIBBON, 176),
     "SEQUENCE_264": (SEQUENCE_264, 64),
     "SEQUENCE_272": (SEQUENCE_272, 64),
-    "CAMERA_264": (CAMERA_264, 100),
-    "CAMERA_272": (CAMERA_272, 116),
-    "PARTICLE_264": (PARTICLE_264, 476),
-    "PARTICLE_CATA": (PARTICLE_CATA, 492),
+    "CAMERA_264": (CAMERA_264, M2_CAMERA_SIZE_WOTLK),
+    "CAMERA_272": (CAMERA_272, M2_CAMERA_SIZE_LEGION),
+    "PARTICLE_264": (PARTICLE_264, M2_PARTICLE_SIZE_WOTLK),
+    "PARTICLE_CATA": (PARTICLE_CATA, M2_PARTICLE_SIZE_CATA),
 }
 for _name, (_schema, _size) in _EXPECTED_SIZES.items():
     if _schema.size != _size:  # pragma: no cover - guards against edits

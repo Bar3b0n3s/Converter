@@ -27,10 +27,6 @@ from .dbc import DbcBuilder, DbcTable
 from .mapping import (MappingLibrary, TableMapping, TransformContext, apply_row,
                       missing_sources, require)
 
-#: Where client databases live in the game's file tree.
-DB2_DIRECTORY = "dbfilesclient"
-
-
 def table_name_for(path: str) -> str:
     """``dbfilesclient/creaturedisplayinfo.db2`` -> ``creaturedisplayinfo``."""
     stem = os.path.splitext(os.path.basename(path.replace("\\", "/")))[0]

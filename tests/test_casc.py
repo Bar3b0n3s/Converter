@@ -110,12 +110,43 @@ def test_corrupt_zlib_is_reported_clearly():
         blte.decode(stream)
 
 
-def test_lz4_chunks_decode():
-    # literal-only LZ4 block: token 0x50 = 5 literals, no match
+def test_lz4_literal_only_block_decodes():
+    # token 0x50 = 5 literals, no match
     payload = b"abcde"
-    chunk = b"4" + bytes([0x50]) + payload
-    stream = b"BLTE" + struct.pack(">I", 0) + chunk
+    stream = b"BLTE" + struct.pack(">I", 0) + b"4" + bytes([0x50]) + payload
     assert blte.decode(stream) == payload
+
+
+def test_lz4_match_copying_decodes():
+    """The match path is what makes LZ4 a compressor; literals alone never
+    exercise it."""
+    # 4 literals "abcd", then a match of 4 bytes at offset 4 -> "abcdabcd"
+    block = bytes([0x40]) + b"abcd" + bytes([0x04, 0x00])
+    stream = b"BLTE" + struct.pack(">I", 0) + b"4" + block
+    assert blte.decode(stream) == b"abcdabcd"
+
+
+def test_lz4_overlapping_match_repeats_a_run():
+    # 1 literal "a", then a 7-byte match at offset 1: the classic run-length case
+    block = bytes([0x13]) + b"a" + bytes([0x01, 0x00])
+    stream = b"BLTE" + struct.pack(">I", 0) + b"4" + block
+    assert blte.decode(stream) == b"a" * 8
+
+
+def test_lz4_extended_literal_length_decodes():
+    """A literal run of 15 or more is extended by the bytes after the token."""
+    literals = bytes(range(32))
+    block = bytes([0xF0, 17]) + literals + bytes([0x20, 0x00])
+    out = blte.decode(b"BLTE" + struct.pack(">I", 0) + b"4" + block)
+    assert out.startswith(literals)
+    assert out == (literals * 2)[:len(out)]
+
+
+def test_a_zero_offset_lz4_match_is_rejected():
+    block = bytes([0x40]) + b"abcd" + bytes([0x00, 0x00])
+    stream = b"BLTE" + struct.pack(">I", 0) + b"4" + block
+    with pytest.raises(MalformedFileError, match="zero match offset"):
+        blte.decode(stream)
 
 
 # ---------------------------------------------------------------------------

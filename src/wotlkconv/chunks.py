@@ -32,10 +32,6 @@ class Chunk:
     size: int
     data: bytes
 
-    @property
-    def header_offset(self) -> int:
-        return self.offset - 8
-
     def reader(self, name: str | None = None) -> Reader:
         return Reader(self.data, name or self.name)
 
@@ -104,17 +100,6 @@ class ChunkReader:
                         data[body : body + size])
             pos = body + size
 
-    def collect(self) -> dict[str, list[Chunk]]:
-        out: dict[str, list[Chunk]] = {}
-        for chunk in self:
-            out.setdefault(chunk.name, []).append(chunk)
-        return out
-
-    def first(self, name: str) -> Chunk | None:
-        for chunk in self:
-            if chunk.name == name:
-                return chunk
-        return None
 
 
 class ChunkWriter:

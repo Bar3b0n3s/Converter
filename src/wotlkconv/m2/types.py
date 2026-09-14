@@ -68,10 +68,6 @@ def _fmt(kind: str) -> struct.Struct:
     return s
 
 
-def value_size(kind: str) -> int:
-    return _fmt(kind).size
-
-
 def _is_scalar(kind: str) -> bool:
     return len(VALUE_FORMATS[kind]) == 1
 
@@ -88,10 +84,6 @@ class Track:
     global_sequence: int = -1
     timestamps: list[list[int]] = dataclasses.field(default_factory=list)
     values: list[list[Any]] = dataclasses.field(default_factory=list)
-
-    @property
-    def is_empty(self) -> bool:
-        return not any(self.values)
 
     def key_count(self) -> int:
         return sum(len(v) for v in self.values)

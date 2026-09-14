@@ -40,12 +40,6 @@ from ..options import Options
 from ..report import FileResult, Status
 from . import split as splitter
 
-#: Sub-chunks 3.3.5a reads, in emission order.
-GROUP_SUBCHUNK_ORDER = (
-    "MOPY", "MOVI", "MOVT", "MONR", "MOTV", "MOBA", "MOLR", "MODR",
-    "MOBN", "MOBR", "MOCV", "MLIQ",
-)
-
 #: Post-Wrath group sub-chunks, with what each one carries.
 MODERN_GROUP_CHUNKS = {
     "MOVX": "32-bit triangle indices",

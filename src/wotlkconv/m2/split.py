@@ -30,10 +30,8 @@ from .skin import Skin
 #: high 16 bits of ``indexStart``, which is how a skin addresses more than
 #: 65 536 triangle indices without widening the field.
 SUBMESH_LEVEL = 0x02
+#: vertexStart, then vertexCount, indexStart and indexCount follow it.
 SUBMESH_VERTEX_START = 0x04
-SUBMESH_VERTEX_COUNT = 0x06
-SUBMESH_INDEX_START = 0x08
-SUBMESH_INDEX_COUNT = 0x0A
 #: M2Batch.skinSectionIndex.
 BATCH_SUBMESH_INDEX = 0x04
 

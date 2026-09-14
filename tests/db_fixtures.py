@@ -225,12 +225,49 @@ def build_wdc3(columns: Sequence[Col], rows: Sequence[dict[str, Any]], *,
         section.extend(relationship_data)
 
     # -- header ------------------------------------------------------------
-    section_header_size = (SECTION_HEADER_WDC2 if magic in ("WDC2", "1SLC")
-                           else SECTION_HEADER_WDC3)
+    if magic == "WDC1":
+        section_header_size = 0
+    elif magic in ("WDC2", "1SLC"):
+        section_header_size = SECTION_HEADER_WDC2
+    else:
+        section_header_size = SECTION_HEADER_WDC3
     prefix = 8 + 128 if magic == "WDC5" else 4
-    header_size = (prefix + WDC3_HEADER_SIZE - 4 + section_header_size
+    # WDC1 keeps copy_table_size in the header in place of a section table,
+    # so its header is one word longer than WDC3's.
+    body = WDC3_HEADER_SIZE - 4 + (4 if magic == "WDC1" else 0)
+    header_size = (prefix + body + section_header_size
                    + len(inline) * 4 + len(storage_infos)
                    + len(pallet_data) + len(common_data))
+
+    if magic == "WDC1":
+        out = bytearray(b"WDC1")
+        out += struct.pack("<I", len(rows))
+        out += struct.pack("<I", len(inline))
+        out += struct.pack("<I", record_size)
+        out += struct.pack("<I", len(string_block))
+        out += struct.pack("<I", table_hash)
+        out += struct.pack("<I", layout_hash)
+        out += struct.pack("<I", min(int(r[id_name]) for r in rows) if rows else 0)
+        out += struct.pack("<I", max(int(r[id_name]) for r in rows) if rows else 0)
+        out += struct.pack("<I", 0)                    # locale
+        out += struct.pack("<I", len(copies) * 8)      # copy_table_size
+        out += struct.pack("<H", 0x04 if use_id_list else 0)
+        out += struct.pack("<H", next((i for i, c in enumerate(inline)
+                                       if c.name == id_name), 0))
+        out += struct.pack("<I", len(columns))
+        out += struct.pack("<I", 0)
+        out += struct.pack("<I", 0)
+        out += struct.pack("<I", len(storage_infos))
+        out += struct.pack("<I", len(common_data))
+        out += struct.pack("<I", len(pallet_data))
+        out += struct.pack("<I", len(relationship_data))
+        for col, offset_bits, size_bits in storages:
+            out += struct.pack("<hH", 32 - (size_bits or 32), offset_bits // 8)
+        out += storage_infos
+        out += pallet_data
+        out += common_data
+        assert len(out) == header_size, (len(out), header_size)
+        return bytes(out) + bytes(section)
 
     out = bytearray(magic.encode("latin-1"))
     if magic == "WDC5":
@@ -321,3 +358,94 @@ def build_dbc(field_count: int, rows: Sequence[Sequence[Any]],
     out += records
     out += strings
     return bytes(out)
+
+
+def build_sparse_wdc3(columns, rows, *, magic: str = "WDC3",
+                      layout_hash: int = 0x1FE1BDA4,
+                      id_column: str | None = None) -> bytes:
+    """A sparse (offset-map) table: variable-length records, inline strings.
+
+    Laid out the way the format describes it -- record region, id list, copy
+    table, offset map, then the offset map's own id list -- so the reader's
+    walk of that order is what is being tested.
+    """
+    inline = [c for c in columns if not c.non_inline]
+    id_name = id_column or next((c.name for c in columns if c.is_id),
+                                columns[0].name)
+    ids = [int(r[id_name]) for r in rows]
+
+    blobs = []
+    for row in rows:
+        blob = bytearray()
+        for col in inline:
+            value = row.get(col.name)
+            items = value if isinstance(value, list) else [value]
+            for slot in range(col.array):
+                item = items[slot] if slot < len(items) else 0
+                if col.type == "string":
+                    blob += str(item).encode("latin-1") + b"\0"
+                else:
+                    blob += _as_words(item, col.type).to_bytes(
+                        max(1, col.bits // 8), "little")
+        while len(blob) % 4:
+            blob += b"\0"
+        blobs.append(bytes(blob))
+
+    storage_infos = bytearray()
+    bit_offset = 0
+    for col in inline:
+        size_bits = col.bits
+        storage_infos += struct.pack("<HHII3I", bit_offset, size_bits, 0,
+                                     STORAGE_NONE, 0, 0, 0)
+        bit_offset += size_bits * col.array
+
+    section_header_size = SECTION_HEADER_WDC3
+    header_size = (4 + WDC3_HEADER_SIZE - 4 + section_header_size
+                   + len(inline) * 4 + len(storage_infos))
+
+    records = b"".join(blobs)
+    offsets = []
+    cursor = header_size
+    for blob in blobs:
+        offsets.append((cursor, len(blob)))
+        cursor += len(blob)
+    records_end = cursor
+
+    offset_map = b"".join(struct.pack("<IH", o, n) for o, n in offsets)
+    offset_map_ids = struct.pack("<" + "I" * len(ids), *ids)
+
+    out = bytearray(magic.encode("latin-1"))
+    out += struct.pack("<I", len(rows))
+    out += struct.pack("<I", len(inline))
+    out += struct.pack("<I", 0)                       # record_size: sparse
+    out += struct.pack("<I", 0)                       # no string table
+    out += struct.pack("<I", 0xDEADBEEF)
+    out += struct.pack("<I", layout_hash)
+    out += struct.pack("<I", min(ids))
+    out += struct.pack("<I", max(ids))
+    out += struct.pack("<I", 0)
+    out += struct.pack("<H", 0x01)                    # FLAG_SPARSE
+    out += struct.pack("<H", 0)
+    out += struct.pack("<I", len(columns))
+    out += struct.pack("<I", 0)
+    out += struct.pack("<I", 0)
+    out += struct.pack("<I", len(storage_infos))
+    out += struct.pack("<I", 0)
+    out += struct.pack("<I", 0)
+    out += struct.pack("<I", 1)                       # section_count
+
+    out += struct.pack("<Q", 0)
+    out += struct.pack("<I", header_size)             # file_offset
+    out += struct.pack("<I", len(rows))
+    out += struct.pack("<I", 0)                       # string_table_size
+    out += struct.pack("<I", records_end)             # offset_records_end
+    out += struct.pack("<I", 0)                       # id_list_size
+    out += struct.pack("<I", 0)                       # relationship_data_size
+    out += struct.pack("<I", len(rows))               # offset_map_id_count
+    out += struct.pack("<I", 0)                       # copy_table_count
+
+    for col in inline:
+        out += struct.pack("<hH", 32 - col.bits, 0)
+    out += storage_infos
+    assert len(out) == header_size, (len(out), header_size)
+    return bytes(out) + records + offset_map + offset_map_ids

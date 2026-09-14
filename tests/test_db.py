@@ -120,7 +120,8 @@ def test_plain_columns_strings_floats_and_arrays(defs_dir):
     assert table.rows[200]["FileDataID"] == 900002
 
 
-@pytest.mark.parametrize("magic", ["WDC2", "1SLC", "WDC3", "WDC4", "WDC5"])
+@pytest.mark.parametrize("magic", ["WDC1", "WDC2", "1SLC", "WDC3", "WDC4",
+                                   "WDC5"])
 def test_every_wdc_magic_decodes(defs_dir, magic):
     index = index_for(defs_dir, "Basic", BASIC_COLUMNS)
     table = parse_db2(DF.build_wdc3(BASIC_COLUMNS, BASIC_ROWS, magic=magic),
@@ -211,9 +212,79 @@ def test_a_definition_with_the_wrong_column_count_falls_back(defs_dir):
     assert not table.named          # rather than mislabelling the columns
 
 
+def test_wdc1_keeps_its_section_bookkeeping_in_the_header(defs_dir):
+    """WDC1 has no section table, so its id list and copy table come from the
+    header; reading them from an empty section header would drop both."""
+    columns = [DF.Col("ID", "int", 32, is_id=True, non_inline=True),
+               DF.Col("V", "int", 32)]
+    raw = DF.build_wdc3(columns, [{"ID": 50, "V": 5}, {"ID": 51, "V": 6}],
+                        magic="WDC1", use_id_list=True, copies=[(900, 50)])
+    table = parse_db2(raw, "U.db2", index_for(defs_dir, "U", columns), "U")
+    assert sorted(table.rows) == [50, 51, 900]
+    assert table.rows[900]["V"] == 5
+
+
+@pytest.mark.parametrize("magic", [b"WDB2", b"WDB3", b"WDB4", b"WDB5", b"WDB6"])
+def test_pre_wdc_formats_are_refused_rather_than_misread(magic):
+    """They lay records out differently enough that reading one as a WDC gives
+    plausible wrong values instead of an error."""
+    with pytest.raises(UnsupportedFormatError, match="WDC1 and later"):
+        parse_db2(magic + b"\0" * 200, "old.db2")
+
+
+def test_a_truncated_file_fails_instead_of_returning_partial_rows(defs_dir):
+    raw = DF.build_wdc3(BASIC_COLUMNS, BASIC_ROWS)
+    index = index_for(defs_dir, "Basic", BASIC_COLUMNS)
+    with pytest.raises(MalformedFileError, match="but the file is"):
+        parse_db2(raw[:-20], "Basic.db2", index, "Basic")
+
+
 def test_a_non_database_is_rejected():
     with pytest.raises(UnsupportedFormatError):
         parse_db2(b"NOPE" + b"\0" * 100, "x.db2")
+
+
+# ---------------------------------------------------------------------------
+# Sparse (offset map) tables
+# ---------------------------------------------------------------------------
+SPARSE_COLUMNS = [
+    DF.Col("ID", "int", 32, is_id=True),
+    DF.Col("V", "int", 32),
+    DF.Col("Name", "string", 32),
+    DF.Col("Tag", "string", 32),
+]
+SPARSE_ROWS = [
+    {"ID": 100, "V": 7, "Name": "alpha", "Tag": "x"},
+    {"ID": 250, "V": 9, "Name": "a much longer name", "Tag": "yy"},
+    {"ID": 9001, "V": 11, "Name": "z", "Tag": ""},
+]
+
+
+def test_sparse_tables_decode_variable_records_with_inline_strings(defs_dir):
+    raw = DF.build_sparse_wdc3(SPARSE_COLUMNS, SPARSE_ROWS)
+    table = parse_db2(raw, "S.db2", index_for(defs_dir, "S", SPARSE_COLUMNS), "S")
+    assert sorted(table.rows) == [100, 250, 9001]
+    assert table.rows[250]["Name"] == "a much longer name"
+    assert table.rows[9001]["Name"] == "z" and table.rows[9001]["Tag"] == ""
+    assert table.rows[100]["V"] == 7
+
+
+def test_a_definition_that_does_not_fit_a_sparse_record_fails(defs_dir):
+    """Walking the columns has to land exactly on the end of the record."""
+    raw = DF.build_sparse_wdc3(SPARSE_COLUMNS, SPARSE_ROWS)
+    short = [DF.Col("ID", "int", 32, is_id=True), DF.Col("V", "int", 32)]
+    index = index_for(defs_dir, "S", short)
+    with pytest.raises(MalformedFileError, match="does not match this table"):
+        parse_db2(raw, "S.db2", index, "S")
+
+
+def test_a_corrupt_sparse_offset_map_fails(defs_dir):
+    raw = bytearray(DF.build_sparse_wdc3(SPARSE_COLUMNS, SPARSE_ROWS))
+    map_at = len(raw) - len(SPARSE_ROWS) * 4 - len(SPARSE_ROWS) * 6
+    struct.pack_into("<IH", raw, map_at, 999999, 8)
+    index = index_for(defs_dir, "S", SPARSE_COLUMNS)
+    with pytest.raises(MalformedFileError, match="outside the record region"):
+        parse_db2(bytes(raw), "S.db2", index, "S")
 
 
 def test_inspect_db2_describes_the_table(defs_dir):
@@ -552,3 +623,149 @@ def test_find_template_is_case_insensitive(tmp_path):
     assert find_template(tmp_path, "CreatureModelData") is not None
     assert find_template(tmp_path, "Missing") is None
     assert find_template(None, "CreatureModelData") is None
+
+
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def db_cli_tree(tmp_path):
+    """A directory laid out the way a user would invoke ``db convert`` on."""
+    defs = tmp_path / "definitions"
+    defs.mkdir()
+    (defs / "CreatureModelData.dbd").write_text(
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4"))
+    (tmp_path / "CreatureModelData.db2").write_bytes(
+        DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS))
+
+    client = tmp_path / "client"
+    client.mkdir()
+    (client / "CreatureModelData.dbc").write_bytes(DF.build_dbc(
+        28, [[1, 0, "creature\\murloc\\murloc.mdx"] + [0] * 25],
+        types=["uint", "uint", "string"] + ["uint"] * 25))
+
+    (tmp_path / "listfile.csv").write_text(
+        "1394961;creature/bear/bear.m2\n1394970;creature/wolf/wolf.m2\n")
+    return tmp_path
+
+
+def test_cli_db_tables_lists_the_builtins(capsys):
+    from wotlkconv.cli import main
+    assert main(["db", "tables"]) == 0
+    out = capsys.readouterr().out
+    assert "CreatureModelData" in out and "CreatureDisplayInfo" in out
+    # every built-in is flagged as unchecked against a real client
+    assert "UNVERIFIED" in out
+
+
+def test_cli_db_tables_can_show_columns(capsys):
+    from wotlkconv.cli import main
+    assert main(["db", "tables", "--verbose-columns"]) == 0
+    assert "<- ID" in capsys.readouterr().out
+
+
+def test_cli_db_convert_merges_onto_the_template(db_cli_tree, tmp_path):
+    from wotlkconv.cli import main
+    out = tmp_path / "out"
+    code = main(["db", "convert", str(db_cli_tree / "CreatureModelData.db2"),
+                 "-o", str(out), "--dbd", str(db_cli_tree / "definitions"),
+                 "-l", str(db_cli_tree / "listfile.csv"),
+                 "--template-dir", str(db_cli_tree / "client"),
+                 "--id-offset", "200000"])
+    assert code == 0
+    table = DbcTable.parse((out / "CreatureModelData.dbc").read_bytes(), "o")
+    assert len(table) == 3                       # one kept, two added
+    assert table.value(0, 2, "string") == "creature\\murloc\\murloc.mdx"
+    assert table.value(1, 0, "uint") == 205001
+    assert table.value(1, 2, "string") == "creature\\bear\\bear.mdx"
+
+
+def test_cli_db_convert_without_definitions_explains_itself(db_cli_tree,
+                                                            tmp_path,
+                                                            monkeypatch):
+    """Columns have no names without a DBD, so the run must refuse."""
+    from wotlkconv.cli import main
+    from wotlkconv.db import dbd
+    monkeypatch.delenv(dbd.ENV_VAR, raising=False)
+    # Somewhere with no definitions/ folder for discovery to find.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert main(["db", "convert", str(db_cli_tree / "CreatureModelData.db2"),
+                 "-o", str(elsewhere / "out")]) == 1
+
+
+def test_definitions_are_discovered_from_the_working_directory(db_cli_tree,
+                                                               tmp_path,
+                                                               monkeypatch):
+    """A 'definitions' folder beside the work is picked up without --dbd."""
+    from wotlkconv.cli import main
+    from wotlkconv.db import dbd
+    monkeypatch.delenv(dbd.ENV_VAR, raising=False)
+    monkeypatch.chdir(db_cli_tree)
+    assert main(["db", "convert", "CreatureModelData.db2",
+                 "-o", str(tmp_path / "out")]) == 0
+
+
+def test_cli_db_convert_selects_rows(db_cli_tree, tmp_path):
+    from wotlkconv.cli import main
+    out = tmp_path / "out"
+    assert main(["db", "convert", str(db_cli_tree / "CreatureModelData.db2"),
+                 "-o", str(out), "--dbd", str(db_cli_tree / "definitions"),
+                 "-l", str(db_cli_tree / "listfile.csv"),
+                 "--only-id", "5002"]) == 0
+    table = DbcTable.parse((out / "CreatureModelData.dbc").read_bytes(), "o")
+    assert len(table) == 1 and table.value(0, 0, "uint") == 5002
+
+
+def test_cli_db_convert_filters_by_column(db_cli_tree, tmp_path):
+    from wotlkconv.cli import main
+    out = tmp_path / "out"
+    assert main(["db", "convert", str(db_cli_tree / "CreatureModelData.db2"),
+                 "-o", str(out), "--dbd", str(db_cli_tree / "definitions"),
+                 "-l", str(db_cli_tree / "listfile.csv"),
+                 "--where", "Flags=1"]) == 0
+    table = DbcTable.parse((out / "CreatureModelData.dbc").read_bytes(), "o")
+    assert len(table) == 1 and table.value(0, 0, "uint") == 5002
+
+
+def test_cli_db_convert_refuses_a_mismatched_template(db_cli_tree, tmp_path):
+    from wotlkconv.cli import main
+    bad = db_cli_tree / "bad"
+    bad.mkdir()
+    (bad / "CreatureModelData.dbc").write_bytes(DF.build_dbc(27, [[1] + [0] * 26]))
+    assert main(["db", "convert", str(db_cli_tree / "CreatureModelData.db2"),
+                 "-o", str(tmp_path / "out"),
+                 "--dbd", str(db_cli_tree / "definitions"),
+                 "--template-dir", str(bad)]) == 1
+
+
+def test_cli_db_convert_keeps_an_existing_file_without_overwrite(db_cli_tree,
+                                                                 tmp_path):
+    from wotlkconv.cli import main
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "CreatureModelData.dbc").write_bytes(b"SENTINEL")
+    args = ["db", "convert", str(db_cli_tree / "CreatureModelData.db2"),
+            "-o", str(out), "--dbd", str(db_cli_tree / "definitions"),
+            "-l", str(db_cli_tree / "listfile.csv")]
+    assert main(args) == 0
+    assert (out / "CreatureModelData.dbc").read_bytes() == b"SENTINEL"
+    assert main(args + ["--overwrite"]) == 0
+    assert (out / "CreatureModelData.dbc").read_bytes() != b"SENTINEL"
+
+
+def test_cli_db_convert_reports_a_missing_file(tmp_path, db_cli_tree):
+    from wotlkconv.cli import main
+    assert main(["db", "convert", str(tmp_path / "nope.db2"),
+                 "-o", str(tmp_path / "out"),
+                 "--dbd", str(db_cli_tree / "definitions")]) == 1
+
+
+def test_a_malformed_where_clause_is_rejected():
+    from wotlkconv.cli import _parse_where
+    from wotlkconv.errors import ConverterError
+    assert _parse_where(["Flags=1", "Name=bear"]) == [("Flags", "1"),
+                                                      ("Name", "bear")]
+    with pytest.raises(ConverterError, match="COLUMN=VALUE"):
+        _parse_where(["Flags"])

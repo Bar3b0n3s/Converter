@@ -41,10 +41,6 @@ MHDR_SIZE = 64
 #: MCNK.flags bit meaning "the 8 bytes at 0x40 are an 8x8 hole mask".
 MCNK_FLAG_HIGH_RES_HOLES = 0x10000
 
-#: Root-level chunks 3.3.5a reads, in emission order.
-ROOT_ORDER = ("MVER", "MHDR", "MCIN", "MTEX", "MMDX", "MMID", "MWMO", "MWID",
-              "MDDF", "MODF", "MH2O", "MCNK", "MFBO", "MTXF")
-
 #: MCNK sub-chunks 3.3.5a reads, in emission order.
 SUBCHUNK_ORDER = ("MCVT", "MCCV", "MCNR", "MCLY", "MCRF", "MCSH", "MCAL",
                   "MCLQ", "MCSE")

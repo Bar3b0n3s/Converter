@@ -206,5 +206,3 @@ def decode(data: bytes, keys=None) -> bytes:
     return bytes(out)
 
 
-def is_blte(data: bytes) -> bool:
-    return len(data) >= 4 and data[:4] == MAGIC

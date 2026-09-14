@@ -29,13 +29,6 @@ from ..limits import (
     WMO_VERSION,
 )
 
-#: Chunks the 3.3.5a root parser reads, in the order Blizzard emitted them.
-ROOT_CHUNK_ORDER = (
-    "MVER", "MOHD", "MOTX", "MOMT", "MOGN", "MOGI", "MOSB", "MOPV",
-    "MOPT", "MOPR", "MOVV", "MOVB", "MOLT", "MODS", "MODN", "MODD",
-    "MFOG", "MCVP",
-)
-
 #: Post-Wrath root chunks, with what each one carries.
 MODERN_ROOT_CHUNKS = {
     "GFID": "group file data IDs",

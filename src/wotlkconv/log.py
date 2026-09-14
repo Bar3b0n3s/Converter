@@ -48,10 +48,6 @@ def set_level(level: int | str) -> None:
     _level = level
 
 
-def get_level() -> int:
-    return _level
-
-
 def set_colour(enabled: bool) -> None:
     global _use_colour
     _use_colour = enabled

@@ -165,11 +165,6 @@ def classify(kind: str, path: str = "",
     return SKIP, "unrecognised format with no extension to judge it by"
 
 
-def is_split_adt(path: str) -> bool:
-    stem = os.path.splitext(os.path.basename(path))[0].lower()
-    return stem.endswith(SPLIT_ADT_SUFFIXES)
-
-
 def adt_base_name(path: str) -> str:
     """``Azeroth_32_48_obj0.adt`` -> ``Azeroth_32_48``."""
     stem = os.path.splitext(os.path.basename(path))[0]

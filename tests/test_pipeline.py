@@ -441,6 +441,31 @@ def test_cli_casc_info(casc_install, capsys):
     assert "product    wow" in capsys.readouterr().out
 
 
+def test_cli_casc_list(casc_install, capsys):
+    install, listfile_path = casc_install
+    assert main(["casc", "list", "--casc", str(install),
+                 "-l", str(listfile_path), "--include", "creature/**"]) == 0
+    out = capsys.readouterr().out
+    assert "creature\\testbeast\\testbeast.m2" in out
+    assert "world\\wmo" not in out
+
+
+def test_cli_casc_list_respects_the_limit(casc_install, capsys):
+    install, listfile_path = casc_install
+    assert main(["casc", "list", "--casc", str(install),
+                 "-l", str(listfile_path), "--include", "**",
+                 "--limit", "2"]) == 0
+    assert "stopping at --limit 2" in capsys.readouterr().out
+
+
+def test_cli_casc_list_needs_a_listfile(casc_install, tmp_path, monkeypatch):
+    install, _listfile_path = casc_install
+    monkeypatch.chdir(tmp_path / "empty" if (tmp_path / "empty").is_dir()
+                      else tmp_path)
+    (tmp_path / "listfile.csv").unlink(missing_ok=True)
+    assert main(["casc", "list", "--casc", str(install), "--include", "**"]) == 1
+
+
 def test_cli_casc_extract_is_raw(casc_install, tmp_path, capsys):
     install, listfile_path = casc_install
     out = tmp_path / "raw"
