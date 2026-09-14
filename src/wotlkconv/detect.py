@@ -50,6 +50,7 @@ PNG = "png"
 BLS = "bls"           # compiled shaders
 TEXT = "text"         # .lua/.xml/.toc/.txt and friends
 MAP_SIDECAR = "map-sidecar"   # _lgt/_occ/_fogs/_mpv .wdt, _lod .adt
+LIQUID = "liquid"     # .wlw/.wlq/.wlm liquid volumes
 UNKNOWN = "unknown"
 
 # What to do with a file, once its kind is known.
@@ -60,7 +61,8 @@ SKIP = "skip"         # cannot be used by 3.3.5a, or is handled elsewhere
 #: Kinds this tool converts. Client databases are handled separately: they
 #: need a definition, a mapping and usually the user's own table as a template,
 #: so they only join a `convert` run once --dbd is supplied.
-CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT, WDL}
+CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT, WDL,
+               LIQUID}
 
 #: Extensions the 3.3.5a client reads as-is. A patch archive needs these just
 #: as much as the converted files, so they are copied rather than dropped.
@@ -74,7 +76,6 @@ COPY_EXTENSIONS = {
     ".trs",                                    # minimap name translation table
     ".tga",                                    # loading screens and raw art
     ".sbt", ".wtf", ".ini", ".cfg",
-    ".wlw", ".wlq", ".wlm",                    # liquid volumes (see below)
     ".lit", ".def",                            # pre-Wrath light and definition
 }
 
@@ -128,7 +129,7 @@ KIND_ACTIONS = {
 EXTENSIONS = {
     M2: ".m2", SKIN: ".skin", ANIM: ".anim", SKEL: ".skel", BLP: ".blp",
     WMO_ROOT: ".wmo", WMO_GROUP: ".wmo", ADT: ".adt", WDT: ".wdt",
-    WDL: ".wdl",
+    WDL: ".wdl", LIQUID: ".wlw",
     DB2: ".db2", DBC: ".dbc",
     WAV: ".wav", MP3: ".mp3", OGG: ".ogg", AVI: ".avi", MP4: ".mp4",
     BNK: ".bnk", WEM: ".wem", TTF: ".ttf", OTF: ".otf",
@@ -143,6 +144,8 @@ CONVERTIBLE_EXTENSIONS = {
     ".skel": "a skeleton", ".blp": "a texture", ".wmo": "a world object",
     ".adt": "a terrain tile", ".wdt": "a map index",
     ".wdl": "a low-resolution heightmap", ".dbc": "a client database",
+    ".wlw": "a liquid volume", ".wlq": "a liquid volume",
+    ".wlm": "a liquid volume",
 }
 
 #: Files that sit beside a map's .wdt or .adt carrying data for systems that
@@ -282,6 +285,8 @@ def detect(data: bytes, path: str = "") -> str:
         return PNG
     if head in (b"GXSH", b"SHAD"):
         return BLS
+    if head in (b"LIQ*", b"*QIL"):
+        return LIQUID
     if data.rstrip(b"\0")[-18:-2] == b"TRUEVISION-XFILE":
         return TGA
 

@@ -25,6 +25,7 @@ from .adt import AdtParts, convert_adt, convert_wdl, convert_wdt
 from .blp import convert_blp
 from .db import DbdIndex, MappingLibrary, convert_db2, find_template
 from .errors import ConverterError
+from .liquid import convert_liquid
 from .listfile import Listfile, to_posix
 from .m2 import convert_anim, convert_m2, convert_skin
 from .options import Options
@@ -498,6 +499,10 @@ class Converter:
 
         if kind == detect.WDL:
             out, result = convert_wdl(data, job.relpath, opts, result)
+            return [Output(target, out, result)]
+
+        if kind == detect.LIQUID:
+            out, result = convert_liquid(data, job.relpath, opts, result)
             return [Output(target, out, result)]
 
         if kind == detect.ADT:

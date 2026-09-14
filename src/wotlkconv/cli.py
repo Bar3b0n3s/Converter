@@ -26,6 +26,7 @@ from .db.dbc import inspect_dbc
 from .db.dbd import ENV_VAR as dbd_env
 from .errors import ConverterError
 from .limits import BLP_SOFT_MAX_DIMENSION, TARGET_BUILD, TARGET_PATCH
+from .liquid import inspect_liquid
 from .listfile import ENV_VAR, Listfile, to_posix
 from .m2 import inspect_anim, inspect_m2, inspect_skin
 from .options import Options, TextureFormat, UnresolvedPolicy
@@ -43,6 +44,7 @@ _INSPECTORS = {
     detect.ADT: inspect_adt,
     detect.WDT: inspect_wdt,
     detect.WDL: inspect_wdl,
+    detect.LIQUID: inspect_liquid,
     detect.DBC: inspect_dbc,
 }
 

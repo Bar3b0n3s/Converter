@@ -889,3 +889,16 @@ def build_wdl(*, tiles=((0, 0), (32, 48)), holes: bool = True,
         add("MLND", b"\0" * 16)
         add("MLFD", b"\0" * 8)
     return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# Liquid volumes
+# ---------------------------------------------------------------------------
+def build_liquid(*, version: int = 1, liquid_type: int = 2, blocks: int = 2,
+                 magic: bytes = b"LIQ*", block_size: int = 64) -> bytes:
+    """A .wlw/.wlq liquid volume: a 12-byte header and opaque blocks."""
+    out = bytearray(magic)
+    out += struct.pack("<HHI", version, liquid_type, blocks)
+    for i in range(blocks):
+        out += bytes([(i + 1) & 0xFF]) * block_size
+    return bytes(out)
