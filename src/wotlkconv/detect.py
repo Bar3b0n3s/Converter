@@ -40,8 +40,6 @@ MP3 = "mp3"
 OGG = "ogg"
 AVI = "avi"
 MP4 = "mp4"
-BNK = "bnk"           # Wwise sound bank
-WEM = "wem"           # Wwise encoded media
 TTF = "ttf"
 OTF = "otf"
 TGA = "tga"
@@ -67,17 +65,28 @@ CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT, WDL,
 #: Extensions the 3.3.5a client reads as-is. A patch archive needs these just
 #: as much as the converted files, so they are copied rather than dropped.
 COPY_EXTENSIONS = {
-    ".wav", ".mp3", ".ogg",                    # sound and music
+    ".ogg", ".mp3", ".wav",                    # sound and music
     ".avi",                                    # cinematics
-    ".lua", ".xml", ".toc", ".txt", ".html",   # interface
-    ".xsd", ".css", ".js",                     # interface support files
-    ".ttf", ".otf",                            # fonts
-    ".zmp",                                    # minimap block data
-    ".trs",                                    # minimap name translation table
-    ".tga",                                    # loading screens and raw art
-    ".sbt", ".wtf", ".ini", ".cfg",
-    ".lit", ".def",                            # pre-Wrath light and definition
+    ".sbt",                                    # cinematic subtitles
+    ".lua", ".xml", ".toc", ".xsd",            # interface
+    ".txt", ".html", ".htm",
+    ".ttf",                                    # fonts
+    ".zmp",                                    # world map terrain blocks
+    ".sig",                                    # signature beside an addon .toc
+    ".wtf", ".ini",                            # configuration
 }
+
+#: Launcher, installer and operating-system files.  They travel in the same
+#: archives as the game data and are not game data: a patch has no use for an
+#: executable, a code signature or a macOS bundle resource.
+SYSTEM_EXTENSIONS = {
+    ".exe", ".dll", ".dylib", ".pak", ".bin", ".icns", ".nib",
+    ".plist", ".strings", ".manifest", ".json", ".url", ".amsfolder",
+    ".signed", ".csp", ".what", ".delete", ".lst",
+}
+
+_SYSTEM_REASON = ("a launcher, installer or operating-system file rather than "
+                  "game data; a 3.3.5a patch archive has no use for it")
 
 #: Extensions that exist in modern builds but cannot be used by 3.3.5a, with
 #: the reason, so the report says why rather than "unrecognised".
@@ -88,21 +97,37 @@ UNSUPPORTED_EXTENSIONS = {
             "it already carries every mip 3.3.5a renders",
     ".phys": "physics rigs; 3.3.5a has no model physics",
     ".bone": "Legion bone override files; no 3.3.5a equivalent",
-    ".mp4": "3.3.5a plays .avi cinematics, not .mp4",
-    ".wwise": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
-    ".bnk": "Wwise sound banks; 3.3.5a plays loose .wav/.mp3/.ogg",
-    ".wem": "Wwise encoded media; 3.3.5a plays loose .wav/.mp3/.ogg and has "
-            "no Wwise runtime to unpack these",
+    ".meta": "per-asset metadata written beside a .blp, .m2 or .ogg; a build "
+             "record rather than something any client loads",
+    ".mdx": "the pre-Wrath model format; 3.3.5a loads .m2 files, and names "
+            "them .mdx in its databases only out of habit",
+    ".dat": "per-tile map data from builds either side of Wrath; not a file "
+            "3.3.5a looks for",
+    ".col": "per-tile collision data; 3.3.5a takes collision from the terrain "
+            "and from each model's own collision mesh",
+    ".h2o": "standalone liquid data; 3.3.5a keeps liquid in the tile's MH2O "
+            "and MCLQ chunks",
+    ".wwe": "world weather effects tied to a WMO; no 3.3.5a equivalent",
+    ".wwf": "weather particulate definitions; no 3.3.5a equivalent",
+    ".pvdata": "particulate volume data; no 3.3.5a equivalent",
+    ".scn": "database scene scripts; no 3.3.5a equivalent",
     ".bls": "compiled shaders for a renderer 3.3.5a does not have; it loads "
             "its own from its own Shaders folder",
-    ".dds": "3.3.5a loads .blp textures, not .dds",
+    ".wfx": "shader effect definitions for a renderer 3.3.5a does not have",
+    ".srt": "the subtitle format modern cinematics use; 3.3.5a reads .sbt",
+    ".m3": "not a World of Warcraft model format",
+    ".mtl3lib": "not a World of Warcraft material format",
     ".png": "3.3.5a loads .blp textures, not .png",
-    ".sig": "CASC content signature; describes the build, not an asset",
-    ".meta": "CASC content metadata; describes the build, not an asset",
-    ".blob": "client configuration blob, tied to the modern build",
-    ".pd4": "development server pathing data; never shipped to a client",
-    ".pm4": "development server pathing data; never shipped to a client",
-    ".anim.skel": "unused",
+    ".tga": "3.3.5a loads .blp textures, not .tga",
+    ".dds": "3.3.5a loads .blp textures, not .dds",
+    ".otf": "3.3.5a loads .ttf fonts, not .otf",
+    ".mp4": "3.3.5a plays .avi cinematics, not .mp4",
+    ".pm4": "development pathing data for a terrain tile; a server-side file "
+            "that never reaches a retail client",
+    ".pd4": "development pathing data for a world object; a server-side file "
+            "that never reaches a retail client",
+    ".blob": "a preload or index blob tied to the modern build's own "
+             "FileDataIDs; meaningless to 3.3.5a",
 }
 
 #: What to do with a detected kind that is not converted, and why.  Detection
@@ -113,16 +138,14 @@ KIND_ACTIONS = {
     OGG: (COPY, ""),
     AVI: (COPY, ""),
     TTF: (COPY, ""),
-    OTF: (COPY, ""),
-    TGA: (COPY, ""),
     TEXT: (COPY, ""),
     DBC: (COPY, "already a 3.3.5a client database"),
     MP4: (SKIP, UNSUPPORTED_EXTENSIONS[".mp4"]),
-    BNK: (SKIP, UNSUPPORTED_EXTENSIONS[".bnk"]),
-    WEM: (SKIP, UNSUPPORTED_EXTENSIONS[".wem"]),
+    OTF: (SKIP, UNSUPPORTED_EXTENSIONS[".otf"]),
     BLS: (SKIP, UNSUPPORTED_EXTENSIONS[".bls"]),
     DDS: (SKIP, UNSUPPORTED_EXTENSIONS[".dds"]),
     PNG: (SKIP, UNSUPPORTED_EXTENSIONS[".png"]),
+    TGA: (SKIP, UNSUPPORTED_EXTENSIONS[".tga"]),
 }
 
 #: Output extension for each kind.
@@ -132,9 +155,14 @@ EXTENSIONS = {
     WDL: ".wdl", LIQUID: ".wlw",
     DB2: ".db2", DBC: ".dbc",
     WAV: ".wav", MP3: ".mp3", OGG: ".ogg", AVI: ".avi", MP4: ".mp4",
-    BNK: ".bnk", WEM: ".wem", TTF: ".ttf", OTF: ".otf",
+    TTF: ".ttf", OTF: ".otf",
     TGA: ".tga", DDS: ".dds", PNG: ".png", BLS: ".bls", TEXT: ".txt",
 }
+
+#: The listfile's placeholder for a file whose type it does not know.  It is a
+#: statement about the name, not about the bytes, so it never decides anything
+#: on its own -- detection has already looked at the content by this point.
+PLACEHOLDER_EXTENSIONS = {".unk"}
 
 #: Extensions that promise a format this tool converts.  If the bytes do not
 #: back the promise the file is broken, not unrecognised, and saying so beats
@@ -180,35 +208,19 @@ SPLIT_ADT_SUFFIXES = ("_obj0", "_obj1", "_tex0", "_tex1", "_lod")
 
 
 def _riff_kind(data: bytes) -> str:
-    """Tell a plain ``.wav`` from an ``.avi`` and from Wwise's ``.wem``.
+    """Tell a ``.wav`` from an ``.avi``; both are RIFF.
 
-    All three are RIFF.  The form type at byte 8 separates AVI from WAVE, and
-    Wwise's own chunks (or its vendor format tag) separate ``.wem`` from a
-    sound 3.3.5a can actually play -- which matters, because one is worth
-    copying into a patch and the other is not.
+    The form type at byte 8 is the whole of it.  There is deliberately no
+    attempt to sub-classify the WAVE further: World of Warcraft ships no
+    Wwise audio at all, so a check for it could only ever be wrong about a
+    sound the client can really play.
     """
     form = data[8:12]
     if form == b"AVI ":
         return AVI
-    if form != b"WAVE":
-        return UNKNOWN
-
-    pos = 12
-    while pos + 8 <= len(data):
-        name = data[pos:pos + 4]
-        size = int.from_bytes(data[pos + 4:pos + 8], "little")
-        if name in (b"vorb", b"seek", b"akd ", b"AKPK"):
-            return WEM
-        if name == b"fmt " and pos + 10 <= len(data):
-            tag = int.from_bytes(data[pos + 8:pos + 10], "little")
-            # 0xFFFF/0xFFFE are the vendor-extensible tags Wwise writes; a
-            # sound the old client can play is PCM or ADPCM.
-            if tag in (0xFFFF, 0xFFFE):
-                return WEM
-        if size <= 0:
-            break
-        pos += 8 + size + (size & 1)
-    return WAV
+    if form == b"WAVE":
+        return WAV
+    return UNKNOWN
 
 
 def _looks_like_text(data: bytes) -> bool:
@@ -273,8 +285,6 @@ def detect(data: bytes, path: str = "") -> str:
         return MP3
     if data[4:8] == b"ftyp":
         return MP4
-    if head == b"BKHD" or head == b"AKPK":
-        return BNK
     if head == b"OTTO":
         return OTF
     if head in (b"\x00\x01\x00\x00", b"true", b"ttcf"):
@@ -355,6 +365,12 @@ def classify(kind: str, path: str = "",
     ext = os.path.splitext(path)[1].lower()
     if ext in UNSUPPORTED_EXTENSIONS:
         return SKIP, UNSUPPORTED_EXTENSIONS[ext]
+    if ext in SYSTEM_EXTENSIONS:
+        return SKIP, _SYSTEM_REASON
+    if ext in PLACEHOLDER_EXTENSIONS:
+        return COPY, ("named .unk because the listfile does not know what it "
+                      "is either; nothing in the bytes identified it, so it "
+                      "is carried through unchanged rather than dropped")
     if ext in COPY_EXTENSIONS:
         return COPY, ""
     if ext in CONVERTIBLE_EXTENSIONS:

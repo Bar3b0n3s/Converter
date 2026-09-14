@@ -1,4 +1,5 @@
-"""Liquid volumes -- ``.wlw``, ``.wlq`` and ``.wlm``.
+"""Liquid volumes -- ``.wlw`` and ``.wlm`` (and ``.wlq``, which the
+community listfile records none of, but which reads the same way).
 
 These sit beside a map and describe the lakes, rivers and lava the terrain's
 own liquid grid cannot: volumes with real shape, the ones the client tests
