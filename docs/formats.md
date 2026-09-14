@@ -89,6 +89,19 @@ A rigged model whose `.skel` cannot be found is a hard failure by default,
 because the alternative is a model with no bones and no animations that looks
 converted. `--allow-missing-skeleton` opts into that.
 
+### Too many vertices
+
+A `.skin` addresses model vertices through a `uint16` array, so no profile —
+modern or Wrath — reaches past vertex 65 535. A model with more is
+unrenderable by *any* client, which is why the converter tries compaction
+before it gives up: geometry no submesh draws is dropped and the skins are
+renumbered, which is lossless and usually settles it.
+
+A model still too large after that is split into several `.m2` files sharing
+one rig, materials and textures, with model-wide effects, attachments and
+collision left on the first piece. Opt-in (`--split-models`), because the extra
+pieces are assets nothing references yet.
+
 ---
 
 ## SKIN — draw data
@@ -103,7 +116,13 @@ and whether the candidate array is plausible.
   model carries a combiner table; otherwise it resets to 0.
 - `M2SkinSection.boneCount` above 256 and `boneInfluences` above 4 are
   reported, not silently accepted.
-- More than 65 535 vertices is a hard failure: the index arrays are `uint16`.
+- `M2SkinSection.Level` is **not** a LOD number: it carries the high 16 bits of
+  `indexStart`, which is how a skin addresses more than 65 536 triangle indices
+  without widening the field. Any tool that rebuilds a skin has to write it, or
+  large submeshes silently wrap.
+- `vertexStart` has no such extension, so a skin's vertex list tops out at
+  65 536 entries; `indexCount` is a plain `uint16`, capping one submesh at
+  21 845 triangles.
 
 ---
 
@@ -164,6 +183,7 @@ alpha; flags are masked to `0x1FF`.
 | `MOVX` (uint32 indices) | `MOVI` (uint16) | converted; over 65 535 vertices is a hard failure |
 | `MPY2` (uint16 material ids) | `MOPY` (uint8) | converted; ids above 255 become the collision-only material `0xFF` |
 | 3+ `MOTV` / `MOCV` layers | 2 | extra layers dropped and the header flags corrected to match |
+| more than 65 535 vertices | several groups | split, with the root updated to match |
 | `MOBS` `MOLS` `MOLP` `MOC2` `MOPL` `MDAL` … | — | dropped |
 
 Shadowlands reused the first twelve bytes of each `MOBA` batch — Wrath's
@@ -173,6 +193,26 @@ values the client would cull against.
 
 `MOGP`'s `flags2` and split-group indices are zeroed; Wrath has no `flags2` and
 reads the last word as padding.
+
+### Splitting an oversized group
+
+`MOVI` is `uint16`, so a 3.3.5a group tops out at 65 536 vertices — which is
+exactly why Shadowlands introduced `MOVX`. Those groups cannot be narrowed, but
+a WMO is a *collection* of groups and nothing stops it having more, so an
+oversized group becomes several and the root is updated:
+
+* `MOHD.nGroups` grows;
+* each new part gets an `MOGI` entry with its own bounding box, the original
+  group's flags, and a name appended to `MOGN`;
+* the parts are written as `<root>_NNN.wmo` after every existing group, so the
+  numbering the root already uses stays put.
+
+Cuts are made on render-batch boundaries where possible, so in the common case
+no vertex is duplicated. Each part's `MOBA` batches get corrected index ranges
+and recomputed bounds, and **the collision tree is rebuilt** — `MOBN`/`MOBR`
+index triangle numbers the split invalidates, and a group without a valid tree
+is one players walk through. Liquid stays with the first part rather than being
+rendered several times over.
 
 ---
 
@@ -240,6 +280,60 @@ CDN; missing files are reported, never downloaded.
 
 ---
 
+## DB2 — client databases
+
+Cataclysm renamed `.dbc` to `.db2`; Legion stopped storing records as structs.
+A WDC-family table packs each column to the narrowest width its values need,
+hoists constant columns into a side table, replaces repeated values with
+indices into a palette, and scatters records across sections that may be
+encrypted.
+
+Field storage types, all of which the reader handles:
+
+| Type | Meaning |
+|---|---|
+| 0 `none` | plain bits in the record, one run per array element |
+| 1 `bitpacked` | a narrow field at a bit offset |
+| 2 `common_data` | a side table keyed by **record id**, with a constant default |
+| 3 `bitpacked_indexed` | the record holds an index into a palette |
+| 4 `bitpacked_indexed_array` | as above, but each slot holds a whole array |
+| 5 `bitpacked_signed` | as 1, sign-extended |
+
+Also handled: id lists (the id lives outside the record), copy tables (a row
+cloned under a new id), relationship columns, and sparse offset maps.
+
+Note `contentFlags`, `localeFlags` and the record count in a root-style block
+are **unsigned** — reading `localeFlags` as signed makes `0xFFFFFFFF` ("every
+locale") come out as -1 and match nothing.
+
+### Getting to a .dbc
+
+Three inputs have to line up:
+
+1. **The data**, from the `.db2`.
+2. **Column names**, from a DBD definition matched on the file's own layout
+   hash. A `.db2` carries no names, and mapping by position across fifteen
+   years of column churn is not safe, so a conversion without a definition
+   refuses rather than guessing.
+3. **The target layout**, from a mapping file and ideally from the user's own
+   client `.dbc` used as a template.
+
+Merging onto a template keeps its records and string block **byte for byte** and
+appends to them. Existing string offsets stay valid, so the merge needs to know
+the types only of the fields it writes — getting a field type wrong elsewhere in
+the row cannot corrupt anything. A template whose field count disagrees with the
+mapping is a hard failure, which is the check that catches a mapping written for
+a different build.
+
+Two spellings the client insists on, handled by transforms:
+
+* model paths in a DBC end in **`.mdx`**, not `.m2`; the client swaps the
+  extension when it opens the file, so a `.m2` path simply does not load;
+* texture variation columns hold a **bare filename** with no directory and no
+  extension, resolved against the model's own folder.
+
+---
+
 <a name="assumptions"></a>
 ## Assumptions where the format is ambiguous
 
@@ -257,3 +351,11 @@ Extracting the chunk body therefore leaves them valid. This is the only
 self-consistent reading — a whole-file base would break as soon as the chunk
 moved — but it has not been checked against a client. Written in
 `src/wotlkconv/m2/anim.py`.
+
+**The built-in DBC field counts and column indices.** These are the least
+certain thing in the project: the 3.3.5a layouts are not in any file the tool
+can read, and they came from documentation rather than from a client. Every
+built-in mapping is marked `"verified": false`, the tool warns when it uses one
+without a template, and it hard-fails when a template disagrees. Pass
+`--template-dir` pointing at your own client's `dbc` folder and the guesswork
+disappears. Written in `src/wotlkconv/db/builtin/*.json`.

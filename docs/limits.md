@@ -9,7 +9,9 @@ works because live Blizzard data never went that far.
 | Limit | Value | Kind | On breach |
 |---|---|---|---|
 | M2 version | 264 | hard | always written |
-| Vertices per skin profile | 65 535 | hard | **fails** — `uint16` indices |
+| Vertices per skin profile | 65 535 | hard | compacted, then split with `--split-models` |
+| Triangles per submesh | 21 845 | hard | `indexCount` is a `uint16` |
+| Indices per skin | 2^32 | hard | `Level` carries indexStart's high 16 bits |
 | Skin profiles (LOD levels) | 4 | hard | clamped, extras reported |
 | Bones per model | 256 | soft | reported |
 | Bones per draw call | 256 | soft | reported |
@@ -40,7 +42,8 @@ works because live Blizzard data never went that far.
 | Limit | Value | Kind |
 |---|---|---|
 | WMO version | 17 | hard |
-| Vertices per group | 65 535 | hard — **fails** |
+| Vertices per group | 65 535 | hard — split into several groups |
+| BSP nodes per group | 32 767 | hard — `int16` child indices |
 | Material shader | 0–6 | hard — higher resets to diffuse |
 | Material blend mode | 0–6 | hard — higher resets to alpha |
 | Material flags | `0x1FF` | hard |
@@ -59,3 +62,12 @@ works because live Blizzard data never went that far.
 | Texture layers per chunk | 4 | hard |
 | Holes | 4×4 per chunk | hard — 8×8 folded down |
 | `MPHD` flags | `0x0F` | hard |
+
+## Client databases
+
+| Limit | Value | Kind |
+|---|---|---|
+| DBC field width | 4 bytes, always | hard |
+| Field types | int, uint, float, string offset | hard — not stored in the file |
+| Model path spelling | `.mdx`, not `.m2` | hard — the client swaps it back |
+| Texture variation columns | bare filename, no path or extension | hard |

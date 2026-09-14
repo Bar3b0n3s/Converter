@@ -115,9 +115,10 @@ jq -r '.files[].notes[]? | select(.code=="m2.limit.bones") | .message' report.js
 
 Two failures are worth acting on rather than working around:
 
-- **`m2.limit.vertices` / `skin.limit.vertices` / `wmo.group.indices`** — the
-  mesh needs splitting in a model editor. 16-bit indices are a format limit,
-  not a policy.
+- **`m2.limit.vertices`** — the model still has more vertices than a `.skin`
+  can index after unused geometry was dropped. Add `--split-models`, or split
+  it in a model editor. (WMO groups in the same position are split
+  automatically, with the root updated to match.)
 - **`m2.skeleton.missing`** — the `.skel` was not available. When converting
   from `--casc` this should not happen; from a manual extraction it means the
   skeleton was not extracted.
@@ -181,13 +182,55 @@ carries the big-alpha flag without which every terrain blend renders wrong.
 
 What it does not do:
 
-- **Map and area records live in DBCs.** `Map.dbc`, `AreaTable.dbc`,
-  `WMOAreaTable.dbc` and friends have to be edited separately; this tool does
-  not convert `.db2` to `.dbc`.
+- **Map and area records** still have to be dealt with. `Map.dbc`,
+  `AreaTable.dbc` and `WMOAreaTable.dbc` have no built-in mapping, so write one
+  (they are small JSON files) or edit them by hand.
 - **Server-side data** — spawns, navmeshes, area triggers — is outside its
   scope entirely.
 - **Coordinates and scale** are unchanged between expansions, but a zone built
   for modern draw distances will still look wrong at 3.3.5a's.
+
+## Making the model appear in game
+
+Converted art is inert until a database row points at it. For a creature that
+means two tables, converted in dependency order onto your own client's copies:
+
+```bash
+git clone https://github.com/wowdev/WoWDBDefs
+
+# the model file itself
+wotlkconv db convert CreatureModelData.db2 -o patch-work/dbfilesclient/ \
+    --dbd WoWDBDefs/definitions -l listfile.csv \
+    --template-dir /my/client/dbc --id-offset 200000
+
+# and the display id your server's creature_template will reference
+wotlkconv db convert CreatureDisplayInfo.db2 -o patch-work/dbfilesclient/ \
+    --dbd WoWDBDefs/definitions -l listfile.csv \
+    --template-dir /my/client/dbc --id-offset 200000
+```
+
+The same `--id-offset` on both runs keeps the reference between them intact:
+`CreatureDisplayInfo.ModelID` is shifted by the same amount as the
+`CreatureModelData.ID` it points at.
+
+`--only-id` narrows a run to the rows you actually converted art for, which is
+usually what you want — a whole modern `CreatureDisplayInfo` is tens of
+thousands of rows referencing models you do not have:
+
+```bash
+wotlkconv db convert CreatureDisplayInfo.db2 -o out/ --dbd WoWDBDefs/definitions \
+    --only-id 100428 --only-id 100429 --template-dir /my/client/dbc
+```
+
+Then point your server at the new display id. The DBCs go in the patch archive
+under `DBFilesClient/`, and the client reads whichever copy the highest-numbered
+patch provides.
+
+**Check the layout.** `wotlkconv db tables` marks every built-in mapping
+`UNVERIFIED`, because the 3.3.5a column layouts came from documentation rather
+than from a client. `--template-dir` turns that from an assumption into a
+checked fact: the tool compares the mapping's field count with your table's and
+refuses to write anything if they disagree.
 
 ## Converting from a manual extraction
 

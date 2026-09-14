@@ -33,6 +33,7 @@ wotlkconv convert --casc "C:\World of Warcraft" --include "creature/**" \
 | `.wmo` group | Shadowlands `MOVX`/`MPY2` | `MOVI`/`MOPY` | recomputes batch bounds, trims UV/colour layers |
 | `.adt` | Cataclysm+ split tiles | monolithic Wrath tile | rebuilds `MCIN`, merges `_tex0` and `_obj0` |
 | `.wdt` | BfA+ with `MAID` | 3.3.5a v17 | drops `MAID`, sets the big-alpha flag |
+| `.db2` | WDC1–WDC5, WDB2/5/6 | `.dbc` | needs a DBD definition and a per-table mapping |
 
 Companion files are found automatically and renamed into the layout the client
 globs for — `Bear.m2` gets `Bear00.skin` … `Bear03.skin` and
@@ -49,13 +50,66 @@ buckets, and the report says which:
   `.mp3`, `.ogg`, `.avi`, `.lua`, `.xml`, `.toc`, `.ttf`, and anything with an
   unfamiliar extension (carried through and flagged rather than dropped).
   `--no-copy-unconverted` turns this off.
-- **Skipped, with the actual reason** — `.db2` client databases (3.3.5a reads
-  `.dbc`, and converting between them needs per-table schemas this tool does
-  not carry), `.tex` streamed texture payloads, `.phys` physics rigs, `.bone`
-  overrides, `.wdl` low-resolution heightmaps. `.skel` files are skipped
-  because they are merged into the model that references them.
+- **Skipped, with the actual reason** — `.tex` streamed texture payloads,
+  `.phys` physics rigs, `.bone` overrides, `.wdl` low-resolution heightmaps.
+  `.skel` files are skipped because they are merged into the model that
+  references them, and `.db2` databases because they need a definition and a
+  mapping (see below).
 
 Nothing is silently discarded.
+
+## Client databases
+
+A converted model is inert until something points at it, and what points at it
+is a row in `CreatureDisplayInfo` or `GameObjectDisplayInfo`. Those live in
+`.db2` files whose format *and* layout both changed completely, so converting
+them needs two things you supply:
+
+```bash
+git clone https://github.com/wowdev/WoWDBDefs
+wotlkconv db convert CreatureDisplayInfo.db2 -o out/ \
+    --dbd WoWDBDefs/definitions \
+    --listfile listfile.csv \
+    --template-dir /my/335a/client/dbc \
+    --id-offset 200000
+```
+
+- **`--dbd`** gives the columns names. A `.db2` carries none; the community
+  definitions supply them, matched on the file's own layout hash. Without it a
+  conversion refuses rather than mapping columns by position.
+- **`--template-dir`** points at *your* client's `.dbc` files. Each table's own
+  file verifies the layout and is merged onto, so the rows you already have
+  survive and the new ones are appended.
+- **`--id-offset`** moves converted ids clear of Blizzard's, so a new display id
+  does not overwrite an existing creature.
+
+Merging keeps the template's records and string block byte for byte and appends
+to them, so existing string offsets stay valid and the tool never has to guess
+the type of a field it is not writing.
+
+`wotlkconv db tables` lists the built-in mappings. They are plain JSON —
+`--db-mappings DIR` overrides any of them, and adding a table means writing one
+file, not changing code.
+
+**The built-in field counts have not been checked against a real client.**
+Without `--template` the tool says so; with one it hard-fails on any
+disagreement rather than writing a misaligned table. Use a template.
+
+## Meshes too big for 16-bit indices
+
+Both formats index vertices with `uint16`, so 65 535 is a hard ceiling. Modern
+assets pass it, and the tool handles that rather than refusing the file:
+
+- **WMO groups** are split into several groups and the root is updated to
+  reference them — group count, bounding boxes, names and all. Each part gets
+  its own render batches and a freshly built collision tree, because a split
+  renumbers the triangles the original tree indexed. This is self-contained and
+  on by default; `--no-split-groups` turns it back into an error.
+- **Models** are first *compacted*: geometry no submesh draws is dropped, which
+  is lossless and usually enough on its own. A model still too large after that
+  can be split into several `.m2` files sharing one rig with `--split-models`.
+  That is opt-in, because the extra pieces are new assets nothing references
+  yet — you have to place them.
 
 ## Reading a game install
 
@@ -133,6 +187,7 @@ wotlkconv convert IN... -o OUT   downgrade assets (from disk, or --casc)
 wotlkconv inspect FILE...        what is this file, and will 3.3.5a load it?
 wotlkconv plan IN...             what would a convert run do?
 wotlkconv casc info|list|extract read a game install
+wotlkconv db convert|tables      turn .db2 databases into 3.3.5a .dbc
 wotlkconv listfile PATH          sanity-check a listfile
 ```
 
@@ -189,6 +244,11 @@ Bear.m2  [m2]  184320 bytes
 | `-j N` | convert N files in parallel |
 | `-n, --dry-run` | convert but write nothing |
 | `--no-copy-unconverted` | drop sound/interface files instead of copying them |
+| `--dbd DIR` | DBD definitions, which also lets `.db2` join a convert run |
+| `--template-dir DIR` | your client's `.dbc` files, to verify and merge onto |
+| `--id-offset N` | shift converted database ids clear of existing ones |
+| `--no-split-groups` | fail on an oversized WMO group instead of splitting it |
+| `--split-models` | split an oversized model into several `.m2` files |
 
 ## Downgrading is lossy, and it says so
 
@@ -215,12 +275,13 @@ running a file through twice never degrades it.
 Some things genuinely cannot be carried across, and the converter fails loudly
 rather than writing something that crashes the client:
 
-- **A mesh with more than 65 535 vertices in one skin profile or WMO group.**
-  16-bit indices are a hard format limit; the mesh has to be split in a model
-  editor first.
 - **A rigged Legion+ model whose `.skel` is missing.** Its bones and animations
   are in that file. Extract it alongside the model, or accept a static model
   with `--allow-missing-skeleton`.
+- **A model still past 65 535 vertices after unused geometry is dropped.**
+  Pass `--split-models`, or split it in a model editor.
+- **A database whose mapping disagrees with your client's table.** Fix the
+  mapping rather than shipping a misaligned `.dbc`.
 
 Others are reported as warnings because the file loads but may look wrong: more
 than 256 bones, more than 256 bones in one draw call, normal maps (3.3.5a has
@@ -257,14 +318,15 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 235 tests, no network or game data needed
+python -m pytest tests/ -q      # 314 tests, no network or game data needed
 python -m ruff check src tests
 ```
 
 The tests build synthetic assets that match the modern wire formats byte for
-byte (`tests/fixtures.py`), and a complete synthetic CASC install — archives,
-indices, encoding and root tables and all (`tests/casc_fixtures.py`) — then push
-them through the real converters. The M2 fixtures serialise through the
+byte (`tests/fixtures.py`), a complete synthetic CASC install — archives,
+indices, encoding and root tables and all (`tests/casc_fixtures.py`) — and
+synthetic `.db2` tables covering every field storage type
+(`tests/db_fixtures.py`), then push them through the real converters. The M2 fixtures serialise through the
 production writer with version-272 schemas, so the parser and writer cannot
 drift apart without a test failing. The ciphers are checked against published
 test vectors.
@@ -276,7 +338,8 @@ clamped to the documented 3.3.5a ranges. It does not run a 3.3.5a client, and
 the CASC reader has not been run against a real retail install — only against
 fixtures built from the format description. Before shipping converted assets,
 load them in a client. If something renders wrong, the `--report` JSON tells
-you which transformation touched it.
+you which transformation touched it. The same caveat applies twice over to the
+built-in database mappings, which is why the tool presses for a template.
 
 A few places where the published format documentation is ambiguous are called
 out explicitly in [`docs/formats.md`](docs/formats.md#assumptions) — those are

@@ -18,7 +18,7 @@ from wotlkconv.report import FileResult, Status
 from wotlkconv.resolve import AssetSource
 from wotlkconv.wmo.bsp import build_bsp, node_count, validate
 from wotlkconv.wmo.convert import convert_wmo_root
-from wotlkconv.wmo.group import convert_group_parts, parse_group
+from wotlkconv.wmo.group import convert_group_parts
 from wotlkconv.wmo.root import parse_root, split_string_table
 
 
