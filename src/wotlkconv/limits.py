@@ -1,0 +1,160 @@
+"""Hard and soft limits of the 3.3.5a (build 12340) client.
+
+"Hard" means the client will refuse to load or will crash; "soft" means the
+asset loads but renders wrongly, or only works because live Blizzard data never
+went that far. Everything here is used by the validators so that a conversion
+either produces a file the 3.3.5a client accepts, or says clearly why it can't.
+"""
+
+from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Build identity
+# ---------------------------------------------------------------------------
+TARGET_EXPANSION = "Wrath of the Lich King"
+TARGET_PATCH = "3.3.5a"
+TARGET_BUILD = 12340
+
+# ---------------------------------------------------------------------------
+# M2
+# ---------------------------------------------------------------------------
+M2_VERSION = 264  # 0x108 -- the only MD20 version 3.3.5a loads
+M2_MAGIC = "MD20"
+M2_CHUNKED_MAGIC = "MD21"  # Legion+ wrapper; must be unwrapped
+
+#: Skin profiles (LOD levels) the client looks for: Model00.skin .. Model03.skin
+M2_MAX_SKIN_PROFILES = 4
+
+#: Skin index arrays are uint16, so a profile cannot address more vertices.
+M2_MAX_VERTICES = 0xFFFF
+
+#: Bone indices in M2Vertex.bone_indices are uint8 *into the submesh window*,
+#: but the global bone array is addressed by uint16 lookups.
+M2_MAX_BONES = 0xFFFF
+#: Above this the 3.3.5a renderer runs out of matrix palette slots in practice.
+M2_SOFT_MAX_BONES = 256
+
+#: Per-vertex bone influences supported by the fixed skinning path.
+M2_MAX_BONE_INFLUENCES = 4
+
+#: Bones referenced by a single draw call (M2SkinSection.boneCount).
+M2_MAX_BONES_PER_SUBMESH = 256
+
+#: Texture units per batch. Legion allows 4, 3.3.5a's combiners handle 2.
+M2_MAX_TEXTURE_UNITS = 2
+
+#: M2Material.blending_mode values the client understands.
+M2_BLEND_MODES = {
+    0: "Opaque",
+    1: "AlphaKey",
+    2: "Alpha",
+    3: "NoAlphaAdd",
+    4: "Add",
+    5: "Mod",
+    6: "Mod2x",
+}
+#: Legion added BlendAdd (7); it degrades to plain Add.
+M2_BLEND_MODE_FALLBACK = {7: 4}
+
+#: M2Material.flags bits understood by 3.3.5a: unlit, unfogged, two-sided,
+#: depth-test-off, depth-write-off. 0x40 and above are Cata+ shadow/blend hints.
+M2_MATERIAL_FLAG_MASK = 0x001F
+
+#: M2CompBone.flags bits understood by 3.3.5a:
+#:  0x1 ignore parent translate, 0x2 ignore parent scale, 0x4 ignore parent
+#:  rotation, 0x8 spherical billboard, 0x10/0x20/0x40 cylindrical billboards,
+#:  0x200 transformed. 0x400 (kinematic/physics bone) and 0x1000
+#:  (helmet_anim_scaled) arrived with Cataclysm and later.
+M2_BONE_FLAG_MASK = 0x000003FF
+
+#: M2 header global flags recognised by 3.3.5a.
+#:  0x1 tilt X, 0x2 tilt Y, 0x8 use texture combiner combos, 0x20 load phys (Cata+)
+M2_GLOBAL_FLAG_MASK = 0x0000000B
+M2_GLOBAL_FLAG_USE_COMBINER_COMBOS = 0x08
+
+#: M2Texture.type values 3.3.5a resolves at runtime. Anything higher is Cata+.
+M2_MAX_TEXTURE_TYPE = 15
+
+#: M2Particle.flags bits above this are Cataclysm-and-later additions, chief
+#: among them 0x10000000 (multi-texture emitters).
+M2_PARTICLE_FLAG_MASK = 0x0FFFFFFF
+M2_PARTICLE_FLAG_MULTI_TEXTURE = 0x10000000
+#: Emitter shapes: 1 plane and 2 sphere exist in 3.3.5a; 3 spline (Cata) and
+#: 4 bone (Legion) do not.
+M2_EMITTER_TYPES_SUPPORTED = (1, 2)
+M2_MAX_PARTICLE_BLEND_MODE = 6
+
+#: Particle emitter struct sizes, by source era.
+M2_PARTICLE_SIZE_WOTLK = 476
+M2_PARTICLE_SIZE_CATA = 492
+
+#: Camera struct sizes: 3.3.5a stores a scalar FoV, Legion+ stores a track.
+M2_CAMERA_SIZE_WOTLK = 100
+M2_CAMERA_SIZE_LEGION = 116
+#: Diagonal FoV used when a Legion FoV track has no usable key.
+M2_DEFAULT_FOV = 0.9749309
+
+# ---------------------------------------------------------------------------
+# SKIN
+# ---------------------------------------------------------------------------
+SKIN_MAGIC = "SKIN"
+SKIN_HEADER_SIZE_WOTLK = 48
+SKIN_HEADER_SIZE_LEGION = 56  # adds M2Array<M2ShadowBatch>
+
+# ---------------------------------------------------------------------------
+# BLP
+# ---------------------------------------------------------------------------
+BLP_MAGIC = "BLP2"
+BLP_VERSION = 1
+
+BLP_COMPRESSION_JPEG = 0      # BLP1 only, never in 3.3.5a assets
+BLP_COMPRESSION_PALETTE = 1
+BLP_COMPRESSION_DXT = 2
+BLP_COMPRESSION_ARGB8888 = 3
+BLP_COMPRESSION_ARGB8888_DUP = 4  # seen in Cata+, same payload as 3
+
+#: alpha_type values inside BLP_COMPRESSION_DXT.
+BLP_DXT1 = 0
+BLP_DXT3 = 1
+BLP_DXT5 = 7
+#: Legion+ normal maps use BC5 here; 3.3.5a has no decoder for it.
+BLP_BC5 = 11
+
+BLP_MAX_MIPS = 16
+#: 3.3.5a's texture cache is sized for 1024; larger works on modern GPUs but
+#: blows the client's memory budget on the 32-bit binary.
+BLP_SOFT_MAX_DIMENSION = 1024
+BLP_HARD_MAX_DIMENSION = 4096
+
+# ---------------------------------------------------------------------------
+# WMO
+# ---------------------------------------------------------------------------
+WMO_VERSION = 17
+#: Chunks the 3.3.5a root parser knows. Anything else is skipped by the client
+#: at best and mis-parsed at worst, so the converter drops them.
+WMO_ROOT_CHUNKS_KNOWN = {
+    "MVER", "MOHD", "MOTX", "MOMT", "MOGN", "MOGI", "MOSB", "MOPV",
+    "MOPT", "MOPR", "MOVV", "MOVB", "MOLT", "MODS", "MODN", "MODD",
+    "MFOG", "MCVP",
+}
+WMO_GROUP_CHUNKS_KNOWN = {
+    "MVER", "MOGP", "MOPY", "MOVI", "MOVT", "MONR", "MOTV", "MOBA",
+    "MOLR", "MODR", "MOBN", "MOBR", "MOCV", "MLIQ",
+}
+#: MOHD.nTextures is a uint32 but the client indexes MOTX by byte offset.
+WMO_MAX_MATERIALS = 0xFFFF
+WMO_MAX_GROUPS = 512
+WMO_MAX_DOODAD_SETS = 0xFFFF
+#: MOBA batch vertex indices are uint16 relative to the group.
+WMO_MAX_GROUP_VERTICES = 0xFFFF
+
+# ---------------------------------------------------------------------------
+# ADT
+# ---------------------------------------------------------------------------
+ADT_VERSION = 18
+ADT_CHUNKS_PER_SIDE = 16
+ADT_MCNK_COUNT = ADT_CHUNKS_PER_SIDE * ADT_CHUNKS_PER_SIDE
+#: 3.3.5a reads one monolithic .adt; Cata+ splits into _obj0/_obj1/_tex0/_tex1.
+ADT_SPLIT_SUFFIXES = ("_obj0", "_obj1", "_tex0", "_tex1", "_lod")
+#: Terrain texture layers per MCNK.
+ADT_MAX_LAYERS = 4
