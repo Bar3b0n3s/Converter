@@ -5,14 +5,16 @@ converter wants lives inside it.  This package implements enough of it to pull
 files out by FileDataID: BLTE decoding, the local ``.idx`` indices, the
 encoding table and the root table.
 
-Only local installs are read; nothing is fetched from Blizzard's CDN.
+Only local installs are read; nothing is fetched from Blizzard's CDN, and
+``CascStorage.coverage`` reports how much of the build that leaves readable.
 """
 
 from .blte import EncryptedChunkError, decode as blte_decode
 from .keys import KeyRing
-from .storage import CascStorage, FileNotInstalledError, StorageStats
+from .storage import (CascStorage, Coverage, FileNotInstalledError,
+                      StorageStats)
 
 __all__ = [
-    "CascStorage", "KeyRing", "StorageStats",
+    "CascStorage", "KeyRing", "StorageStats", "Coverage",
     "EncryptedChunkError", "FileNotInstalledError", "blte_decode",
 ]

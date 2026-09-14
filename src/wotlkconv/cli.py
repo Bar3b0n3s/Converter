@@ -236,8 +236,11 @@ examples:
     casc = sub.add_parser("casc", parents=[common, casc_opts],
                           help="inspect or extract from a game install")
     casc_sub = casc.add_subparsers(dest="casc_command", required=True)
-    casc_sub.add_parser("info", parents=[common, casc_opts],
-                        help="show what build the install holds")
+    ci = casc_sub.add_parser("info", parents=[common, casc_opts],
+                             help="show what build the install holds")
+    ci.add_argument("--coverage-sample", type=int, default=0, metavar="N",
+                    help="measure local coverage from N files spread across "
+                         "the build instead of all of them")
     cl = casc_sub.add_parser("list", parents=[common, casc_opts],
                              help="list files matching a path glob")
     cl.add_argument("--include", action="append", default=[], metavar="GLOB")
@@ -345,6 +348,11 @@ def _read_globs(path: str | None) -> list[str]:
     return out
 
 
+#: A full install lists millions of files; a spread sample says as much about
+#: how much of it is local, without walking the whole root table twice.
+COVERAGE_SAMPLE = 20000
+
+
 def _open_casc(args: argparse.Namespace, search_dirs) -> tuple[object, dict]:
     """Open the install named by --casc and describe it for worker processes."""
     keys = KeyRing.discover(getattr(args, "casc_keys", None),
@@ -401,6 +409,17 @@ def cmd_convert(args: argparse.Namespace) -> int:
                       "listfile; pass --listfile, or select by --fileid instead")
             return 1
         storage, casc_args = _open_casc(args, search_dirs)
+        # Say what this install actually holds before converting anything: a
+        # partial install is normal, and the files it lacks would otherwise
+        # turn up as a pile of read failures at the end of a long run.
+        coverage = storage.coverage(sample=COVERAGE_SAMPLE)
+        if coverage.not_downloaded:
+            log.warn(f"{coverage.describe()}. Nothing is fetched from the "
+                     f"CDN, so files that are not on disk will be reported "
+                     f"as not installed. Run the game's own updater if you "
+                     f"need them")
+        else:
+            log.info(coverage.describe())
         cjobs, cskipped = plan_casc(
             storage, listfile, include=includes, file_ids=args.fileid,
             exclude=args.exclude, claim_companions=not args.no_companions,
@@ -610,6 +629,13 @@ def cmd_casc(args: argparse.Namespace) -> int:
             print(f"indices    {stats.index_buckets} bucket(s), "
                   f"{storage.index.total_entries()} entries")
             print(f"keys       {stats.keys} encryption key(s) loaded")
+            coverage = storage.coverage(sample=args.coverage_sample)
+            print(f"local      {coverage.describe()}")
+            if coverage.not_downloaded:
+                print("           this tool reads only what is on disk; it "
+                      "never fetches from the CDN,")
+                print("           so those files are reported as not "
+                      "installed rather than downloaded.")
             return 0
 
         listfile = Listfile.discover(getattr(args, "listfile", None), search_dirs)

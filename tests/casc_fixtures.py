@@ -157,8 +157,16 @@ def make_index(bucket: int, entries: dict[bytes, tuple[int, int, int]]) -> bytes
 def build_install(root_dir: Path, files: dict[int, bytes], *,
                   product: str = "wow", version: str = "11.0.5.57212",
                   mfst: bool = True, locale_flags: int = 0xFFFFFFFF,
-                  chunk_size: int = 0) -> Path:
-    """Write a complete, readable CASC install under ``root_dir``."""
+                  chunk_size: int = 0,
+                  not_downloaded: dict[int, bytes] | None = None,
+                  no_encoding: dict[int, bytes] | None = None) -> Path:
+    """Write a CASC install under ``root_dir``.
+
+    ``files`` are stored locally and readable.  ``not_downloaded`` are listed
+    by the build and keyed by the encoding table, but no local archive holds
+    them -- the install would stream them from the CDN.  ``no_encoding`` are
+    named by root alone, which is the other way a listed file can be absent.
+    """
     data_dir = root_dir / "Data" / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,6 +194,16 @@ def build_install(root_dir: Path, files: dict[int, bytes], *,
         ekey = store(payload)
         encoding_map[ckey] = (ekey, len(payload))
         root_entries[file_id] = ckey
+
+    for file_id, payload in sorted((not_downloaded or {}).items()):
+        # Keyed, but never written into an archive or an index.
+        ckey = md5(payload)
+        encoding_map[ckey] = (md5(make_blte(payload, chunk_size=chunk_size)),
+                              len(payload))
+        root_entries[file_id] = ckey
+
+    for file_id, payload in sorted((no_encoding or {}).items()):
+        root_entries[file_id] = md5(payload)
 
     root_raw = make_root(root_entries, mfst=mfst, locale_flags=locale_flags)
     root_ckey = md5(root_raw)

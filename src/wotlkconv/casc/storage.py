@@ -8,10 +8,18 @@ Putting the pieces together, resolving one FileDataID means::
     data.NNN  bytes at that offset, behind a 30-byte entry header
     BLTE      decode the stream
 
-Only *local* storage is read.  Modern installs can be partial, with the rest
-streamed from Blizzard's CDN on demand; files that are not on disk are reported
-as missing rather than downloaded, because fetching them would mean pulling
-content the user has not installed.
+Only *local* storage is read, and that is a real boundary rather than a
+limitation to work around.  A modern install is a catalogue with a cache
+behind it: the root table lists every file the build has, while the archives
+on disk hold only what this machine has actually downloaded.  The rest is
+streamed from Blizzard's CDN as the game asks for it.
+
+Fetching those would mean pulling content the user has not installed, from
+Blizzard's servers, on their connection -- so this tool does not.  A file that
+is listed but not stored is reported as not installed, with the difference
+spelled out, and :meth:`CascStorage.coverage` says up front how much of the
+build is actually readable here, so the gap is known before a conversion run
+rather than discovered as a pile of failures afterwards.
 """
 
 from __future__ import annotations
@@ -32,6 +40,40 @@ from .root import LOCALE_NAMES, RootTable
 
 class FileNotInstalledError(MissingDependencyError):
     """The file exists in the build but its data is not on this machine."""
+
+
+@dataclasses.dataclass(slots=True)
+class Coverage:
+    """How much of the build this machine actually holds.
+
+    ``listed`` counts what the root table names; ``local`` counts what can be
+    read without touching the network.  The two differ on any install that has
+    not downloaded everything, which is most of them.
+    """
+
+    listed: int
+    local: int
+    #: Named by root, but the encoding table has no key for it.
+    no_encoding: int
+    #: Keyed, but no local archive holds it: the CDN would have to be asked.
+    not_downloaded: int
+    #: Set when only part of the build was measured.
+    sampled: int = 0
+
+    @property
+    def measured(self) -> int:
+        return self.sampled or self.listed
+
+    @property
+    def fraction(self) -> float:
+        return self.local / self.measured if self.measured else 0.0
+
+    def describe(self) -> str:
+        where = (f"{self.local} of {self.measured} files"
+                 + (f" sampled from {self.listed}" if self.sampled else ""))
+        return (f"{where} ({self.fraction * 100:.1f}%) are stored on this "
+                f"machine; {self.not_downloaded} would have to come from the "
+                f"CDN and {self.no_encoding} have no encoding entry")
 
 
 @dataclasses.dataclass(slots=True)
@@ -159,6 +201,32 @@ class CascStorage:
             return None, str(exc)
         except (MissingDependencyError, MalformedFileError) as exc:
             return None, str(exc)
+
+    def coverage(self, sample: int = 0) -> Coverage:
+        """Count how many of the build's files are readable without the CDN.
+
+        Nothing is decoded -- this walks the same three lookups a read does
+        and stops at the index, so it costs dictionary lookups rather than I/O.
+        ``sample`` measures an evenly spread subset of a large install instead
+        of all of it.
+        """
+        ids = sorted(self.root.file_ids())
+        step = max(1, len(ids) // sample) if sample and sample < len(ids) else 1
+        chosen = ids[::step] if step > 1 else ids
+
+        local = no_encoding = not_downloaded = 0
+        for file_id in chosen:
+            ckey = self.root.ckey_for(file_id)
+            ekey = self.encoding.ekey_for(ckey) if ckey else None
+            if ekey is None:
+                no_encoding += 1
+            elif self.index.find(ekey) is None:
+                not_downloaded += 1
+            else:
+                local += 1
+        return Coverage(listed=len(ids), local=local, no_encoding=no_encoding,
+                        not_downloaded=not_downloaded,
+                        sampled=len(chosen) if step > 1 else 0)
 
     def stats(self) -> StorageStats:
         return StorageStats(

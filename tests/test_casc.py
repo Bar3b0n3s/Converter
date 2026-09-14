@@ -344,3 +344,77 @@ def test_key_ring_parses_the_community_format(tmp_path):
 
 def test_an_empty_key_ring_is_falsy():
     assert not KeyRing()
+
+
+# ---------------------------------------------------------------------------
+# How much of the build is actually here
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def partial_install(tmp_path):
+    """An install like a real one: listed in full, downloaded in part."""
+    return CF.build_install(
+        tmp_path / "game",
+        {100: b"stored one", 101: b"stored two"},
+        not_downloaded={200: b"on the cdn", 201: b"also on the cdn",
+                        202: b"and this"},
+        no_encoding={300: b"no key at all"})
+
+
+def test_coverage_separates_stored_from_streamed(partial_install):
+    with CascStorage.open(partial_install) as storage:
+        coverage = storage.coverage()
+    assert coverage.listed == 6
+    assert coverage.local == 2
+    assert coverage.not_downloaded == 3
+    assert coverage.no_encoding == 1
+    assert coverage.fraction == pytest.approx(2 / 6)
+
+
+def test_coverage_describes_itself_in_terms_of_the_cdn(partial_install):
+    with CascStorage.open(partial_install) as storage:
+        text = storage.coverage().describe()
+    assert "2 of 6 files" in text and "33.3%" in text
+    assert "3 would have to come from the CDN" in text
+
+
+def test_a_file_that_is_only_listed_says_so_rather_than_being_fetched(
+        partial_install):
+    with CascStorage.open(partial_install) as storage:
+        data, why = storage.try_read_file_id(200)
+    assert data is None
+    assert "streams it from the CDN rather than storing it" in why
+
+
+def test_coverage_can_be_sampled_on_a_large_build(tmp_path):
+    install = CF.build_install(tmp_path / "game",
+                               {i: b"x" * 8 for i in range(100)})
+    with CascStorage.open(install) as storage:
+        full = storage.coverage()
+        sampled = storage.coverage(sample=10)
+    assert full.sampled == 0 and full.listed == 100 and full.local == 100
+    assert sampled.listed == 100 and sampled.measured == 10
+    assert sampled.local == 10 and sampled.fraction == 1.0
+
+
+def test_a_sample_larger_than_the_build_measures_all_of_it(partial_install):
+    with CascStorage.open(partial_install) as storage:
+        assert storage.coverage(sample=1000).sampled == 0
+
+
+def test_casc_info_states_the_cdn_boundary(partial_install, capsys):
+    from wotlkconv.cli import main
+
+    assert main(["casc", "info", "--casc", str(partial_install)]) == 0
+    out = capsys.readouterr().out
+    assert "local      2 of 6 files" in out
+    assert "never fetches from the CDN" in out
+
+
+def test_casc_info_on_a_complete_install_does_not_warn(tmp_path, capsys):
+    install = CF.build_install(tmp_path / "game", {1: b"all here"})
+    from wotlkconv.cli import main
+
+    assert main(["casc", "info", "--casc", str(install)]) == 0
+    out = capsys.readouterr().out
+    assert "1 of 1 files (100.0%)" in out
+    assert "never fetches from the CDN" not in out
