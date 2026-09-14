@@ -204,13 +204,21 @@ def _clamp_batches(skin: Skin, uses_combiner_combos: bool,
 def _validate_submeshes(skin: Skin, opts: Options, result: FileResult) -> None:
     over_bones = 0
     over_influences = 0
+    over_indices = 0
     for i, raw in enumerate(skin.submeshes):
-        (_sid, _level, _vstart, _vcount, _istart, _icount,
-         bone_count, _bone_combo, influences, _center) = struct.unpack_from("<10H", raw, 0)
+        (_sid, level, vertex_start, vertex_count, _istart, index_count,
+         bone_count, _bone_combo, influences, _center) = struct.unpack_from(
+            "<10H", raw, 0)
         if bone_count > M2_MAX_BONES_PER_SUBMESH:
             over_bones += 1
         if influences > M2_MAX_BONE_INFLUENCES:
             over_influences += 1
+        if vertex_start + vertex_count > M2_MAX_VERTICES + 1:
+            over_indices += 1
+    if over_indices:
+        result.lossy("skin.limit.submesh_range",
+                     f"{over_indices} submesh(es) address vertices past the "
+                     f"end of the 16-bit range", submeshes=over_indices)
     if over_bones:
         msg = (f"{over_bones} submesh(es) reference more than "
                f"{M2_MAX_BONES_PER_SUBMESH} bones in one draw call; 3.3.5a will "
@@ -227,6 +235,27 @@ def _validate_submeshes(skin: Skin, opts: Options, result: FileResult) -> None:
                      submeshes=over_influences)
 
 
+def downgrade_skin(skin: Skin, opts: Options, uses_combiner_combos: bool,
+                   res: FileResult) -> bool:
+    """Apply the 3.3.5a clamps to an already-parsed skin. False if unusable."""
+    if len(skin.vertices) > M2_MAX_VERTICES:
+        res.fail("skin.limit.vertices",
+                 f"{len(skin.vertices)} vertices exceeds the 16-bit index limit "
+                 f"of {M2_MAX_VERTICES}", vertices=len(skin.vertices))
+        return False
+
+    if skin.shadow_batch_count:
+        res.lossy("skin.shadow_batches",
+                  f"dropped {skin.shadow_batch_count} shadow batch(es); 3.3.5a "
+                  f"draws model shadows from a blob texture instead",
+                  batches=skin.shadow_batch_count)
+        skin.shadow_batch_count = 0
+
+    _clamp_batches(skin, uses_combiner_combos, res)
+    _validate_submeshes(skin, opts, res)
+    return res.ok
+
+
 def convert_skin(data: bytes, source_name: str, opts: Options,
                  uses_combiner_combos: bool = False,
                  result: FileResult | None = None) -> tuple[bytes, FileResult]:
@@ -235,29 +264,18 @@ def convert_skin(data: bytes, source_name: str, opts: Options,
     res.bytes_in = len(data)
 
     skin = parse_skin(data, source_name)
-    res.source_version = (f"SKIN {'legion' if skin.had_legion_header else 'wotlk'} "
+    was_legion = skin.had_legion_header
+    res.source_version = (f"SKIN {'legion' if was_legion else 'wotlk'} "
                           f"{len(skin.vertices)} verts, {skin.triangle_count} tris, "
                           f"{len(skin.submeshes)} submeshes")
 
-    if len(skin.vertices) > M2_MAX_VERTICES:
-        res.fail("skin.limit.vertices",
-                 f"{len(skin.vertices)} vertices exceeds the 16-bit index limit "
-                 f"of {M2_MAX_VERTICES}", vertices=len(skin.vertices))
+    if not downgrade_skin(skin, opts, uses_combiner_combos, res):
         return b"", res
-
-    if skin.shadow_batch_count:
-        res.lossy("skin.shadow_batches",
-                  f"dropped {skin.shadow_batch_count} shadow batch(es); 3.3.5a "
-                  f"draws model shadows from a blob texture instead",
-                  batches=skin.shadow_batch_count)
-
-    _clamp_batches(skin, uses_combiner_combos, res)
-    _validate_submeshes(skin, opts, res)
 
     out = write_skin(skin)
     res.bytes_out = len(out)
     res.target_version = f"SKIN wotlk {len(skin.vertices)} verts"
-    if not skin.had_legion_header and res.status is Status.OK:
+    if not was_legion and res.status is Status.OK:
         # Already a Wrath-shaped skin; it was only normalised, not downgraded.
         res.status = Status.PASSTHROUGH
         res.info("skin.passthrough", "already a 3.3.5a skin layout")

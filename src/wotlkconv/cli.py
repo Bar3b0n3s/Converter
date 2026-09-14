@@ -193,6 +193,15 @@ examples:
                      help="treat exceeding a 3.3.5a soft limit as an error")
     mdl.add_argument("--no-merge-adt", action="store_true",
                      help="do not merge split terrain tiles")
+    mdl.add_argument("--no-split-groups", action="store_true",
+                     help="fail on a WMO group with more vertices than 16-bit "
+                          "indices reach, instead of splitting it into several "
+                          "groups and updating the root")
+    mdl.add_argument("--split-models", action="store_true",
+                     help="split a model that still has too many vertices after "
+                          "unused geometry is dropped into several .m2 files "
+                          "sharing one rig; nothing references the extra pieces, "
+                          "so you have to place them")
     mdl.add_argument("--no-copy-unconverted", action="store_true",
                      help="drop formats 3.3.5a reads unchanged (sound, "
                           "interface, fonts) instead of copying them through")
@@ -307,6 +316,8 @@ def _options_from(args: argparse.Namespace) -> Options:
         allow_missing_skeleton=args.allow_missing_skeleton,
         convert_companions=not args.no_companions,
         merge_split_adt=not args.no_merge_adt,
+        split_oversized_groups=not args.no_split_groups,
+        split_oversized_models=args.split_models,
         copy_unconverted=not args.no_copy_unconverted,
         db_mappings=getattr(args, "db_mappings", "") or "",
         db_templates=getattr(args, "template_dir", "") or "",

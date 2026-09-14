@@ -21,7 +21,8 @@ from ..resolve import AssetSource
 from .anim import convert_anim
 from .downgrade import anim_filename, downgrade_model
 from .model import M2Model, parse_m2
-from .skin import convert_skin
+from .skin import Skin, downgrade_skin, parse_skin, write_skin
+from .split import ModelPart, split_model
 from .write import write_md20
 
 
@@ -53,46 +54,67 @@ def _model_stem(source_name: str, model: M2Model,
     return stem
 
 
-def _collect_skins(model: M2Model, stem: str, source: AssetSource | None,
-                   source_name: str, opts: Options,
-                   result: FileResult) -> list[ConvertedAsset]:
-    out: list[ConvertedAsset] = []
+def _load_skins(model: M2Model, source: AssetSource | None, source_name: str,
+                opts: Options, result: FileResult
+                ) -> tuple[dict[int, Skin], list[ConvertedAsset]]:
+    """Find and parse the model's skin profiles, ready for splitting."""
+    skins: dict[int, Skin] = {}
+    failures: list[ConvertedAsset] = []
     if source is None:
-        return out
+        return skins, failures
 
     wanted = min(max(model.num_skin_profiles, len(model.skin_file_ids)),
                  M2_MAX_SKIN_PROFILES)
-    found = 0
+    src_stem = os.path.splitext(os.path.basename(source_name))[0]
     for index in range(wanted):
         raw = None
         if index < len(model.skin_file_ids):
             raw = source.by_file_id(model.skin_file_ids[index], ".skin")
         if raw is None:
-            src_stem = os.path.splitext(os.path.basename(source_name))[0]
             raw = source.by_path(f"{src_stem}{index:02d}.skin")
         if raw is None:
             continue
+        name = f"{src_stem}{index:02d}.skin"
+        try:
+            skins[index] = parse_skin(raw, name)
+        except Exception as exc:  # noqa: BLE001 - reported per file
+            sub = FileResult(source=name, kind="skin")
+            sub.fail("skin.error", f"{type(exc).__name__}: {exc}")
+            failures.append(ConvertedAsset(name, b"", sub))
+
+    if not skins and wanted:
+        result.warn("m2.skin.missing",
+                    "no .skin profiles found next to the model; 3.3.5a will "
+                    "not render it without its 00.skin",
+                    expected=wanted)
+    elif len(skins) < wanted:
+        result.info("m2.skin.partial",
+                    f"found {len(skins)} of {wanted} skin profile(s)",
+                    found=len(skins), expected=wanted)
+    return skins, failures
+
+
+def _emit_skins(part: ModelPart, stem: str, opts: Options,
+                uses_combiner_combos: bool) -> list[ConvertedAsset]:
+    """Downgrade and serialise a part's skin profiles."""
+    out: list[ConvertedAsset] = []
+    written: dict[int, bytes] = {}
+    for index, skin in sorted(part.skins.items()):
         name = f"{stem}{index:02d}.skin"
         sub = FileResult(source=name, kind="skin")
-        try:
-            data, sub = convert_skin(raw, name, opts, model.uses_combiner_combos, sub)
-        except Exception as exc:  # noqa: BLE001 - reported per file
-            sub.fail("skin.error", f"{type(exc).__name__}: {exc}")
-            out.append(ConvertedAsset(name, b"", sub))
-            continue
-        if sub.ok and data:
-            out.append(ConvertedAsset(name, data, sub))
-            found += 1
-
-    if found == 0 and wanted:
-        result.warn("m2.skin.missing",
-                    f"no .skin profiles found next to the model; 3.3.5a will not "
-                    f"render it without {stem}00.skin",
-                    expected=wanted)
-    elif found < wanted:
-        result.info("m2.skin.partial",
-                    f"found {found} of {wanted} skin profile(s)",
-                    found=found, expected=wanted)
+        sub.source_version = (f"SKIN {len(skin.vertices)} verts, "
+                              f"{skin.triangle_count} tris, "
+                              f"{len(skin.submeshes)} submeshes")
+        cached = written.get(id(skin))
+        if cached is None:
+            if not downgrade_skin(skin, opts, uses_combiner_combos, sub):
+                out.append(ConvertedAsset(name, b"", sub))
+                continue
+            cached = write_skin(skin)
+            written[id(skin)] = cached
+        sub.bytes_out = len(cached)
+        sub.target_version = f"SKIN wotlk {len(skin.vertices)} verts"
+        out.append(ConvertedAsset(name, cached, sub))
     return out
 
 
@@ -151,23 +173,48 @@ def convert_m2(data: bytes, source_name: str, opts: Options,
         res.elapsed = time.time() - started
         return b"", res, []
 
-    out = write_md20(model)
+    stem = _model_stem(source_name, model, output_stem)
+    companions: list[ConvertedAsset] = []
+    skins: dict[int, Skin] = {}
+    if opts.convert_companions:
+        skins, failures = _load_skins(model, source, source_name, opts, res)
+        companions += failures
+
+    parts = split_model(model, skins, opts, res)
+    if not parts or not res.ok:
+        res.elapsed = time.time() - started
+        return b"", res, []
+
+    primary = parts[0]
+    out = write_md20(primary.model)
     res.bytes_out = len(out)
     res.extra.update({
         "name": model.name,
-        "vertices": model.vertex_count,
+        "vertices": primary.model.vertex_count,
         "bones": len(model.bones),
         "sequences": len(model.sequences),
         "textures": len(model.textures),
-        "particles": len(model.particles),
+        "particles": len(primary.model.particles),
         "skin_profiles": model.num_skin_profiles,
+        "parts": len(parts),
     })
 
-    companions: list[ConvertedAsset] = []
     if opts.convert_companions:
-        stem = _model_stem(source_name, model, output_stem)
-        companions += _collect_skins(model, stem, source, source_name, opts, res)
+        companions += _emit_skins(primary, stem, opts,
+                                  model.uses_combiner_combos)
         companions += _collect_anims(model, stem, source, opts, res)
+
+    for part in parts[1:]:
+        name = f"{stem}{part.suffix}"
+        sub = FileResult(source=f"{name}.m2", kind="m2", status=res.status)
+        sub.info("m2.split.part",
+                 f"geometry split out of {stem}.m2 because the model has more "
+                 f"vertices than a .skin can index")
+        data = write_md20(part.model)
+        sub.bytes_out = len(data)
+        sub.extra["vertices"] = part.model.vertex_count
+        companions.append(ConvertedAsset(f"{name}.m2", data, sub))
+        companions += _emit_skins(part, name, opts, model.uses_combiner_combos)
 
     if already_wotlk and res.status is Status.OK:
         res.status = Status.PASSTHROUGH

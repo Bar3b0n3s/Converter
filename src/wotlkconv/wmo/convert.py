@@ -23,7 +23,8 @@ from ..listfile import Listfile, normalise
 from ..options import Options, UnresolvedPolicy
 from ..report import FileResult, Status
 from ..resolve import AssetSource
-from .group import convert_group
+from ..limits import MOGI_SIZE
+from .group import convert_group_parts
 from .root import MODERN_ROOT_CHUNKS, StringTable, WmoRoot, parse_root, split_string_table
 
 
@@ -32,6 +33,16 @@ class ConvertedAsset:
     filename: str
     data: bytes
     result: FileResult
+
+
+@dataclasses.dataclass(slots=True)
+class GroupAddition:
+    """A group the root did not have before, because a split produced it."""
+
+    source_index: int
+    bounding_box: tuple
+    flags: int
+    name: str
 
 
 def _resolve(file_id: int, kind: str, opts: Options, listfile: Listfile,
@@ -244,8 +255,34 @@ def convert_wmo_root(data: bytes, source_name: str, opts: Options,
     mosb = _skybox(root, opts, listfile, res)
 
     # -- header ---------------------------------------------------------
+    # Groups are converted before the root is written: an oversized group
+    # splits into several, and the root has to describe the ones it gained.
+    companions, additions = _convert_groups(root, source_name, opts, source, res,
+                                            output_stem)
+
+    mogn = bytearray(root.payload("MOGN") or b"\0" * 4)
+    mogi = bytearray(root.payload("MOGI"))
+    if additions:
+        for addition in additions:
+            name_offset = len(mogn)
+            mogn += addition.name.encode("latin-1") + b"\0"
+            while len(mogn) % 4:
+                mogn += b"\0"
+            entry = bytearray(MOGI_SIZE)
+            struct.pack_into("<I", entry, 0, addition.flags)
+            struct.pack_into("<6f", entry, 4, *addition.bounding_box)
+            struct.pack_into("<i", entry, 28, name_offset)
+            mogi += entry
+        res.info("wmo.group.added",
+                 f"registered {len(additions)} extra group(s) in the root, "
+                 f"created by splitting oversized ones",
+                 groups=len(additions))
+
+    total_groups = root.n_groups + len(additions)
+
     mohd = bytearray(root.payload("MOHD")[:MOHD_SIZE])
     struct.pack_into("<I", mohd, 0, len(split_string_table(motx)) if motx else 0)
+    struct.pack_into("<I", mohd, 4, total_groups)
     struct.pack_into("<I", mohd, 16, len(split_string_table(modn)) if modn else 0)
     flags = root.header_flags & WMO_HEADER_FLAG_MASK
     struct.pack_into("<I", mohd, 60, flags)
@@ -267,8 +304,8 @@ def convert_wmo_root(data: bytes, source_name: str, opts: Options,
     cw.add("MOHD", bytes(mohd))
     cw.add("MOTX", motx or b"\0" * 4)
     cw.add("MOMT", momt)
-    cw.add("MOGN", root.payload("MOGN") or b"\0" * 4)
-    cw.add("MOGI", root.payload("MOGI"))
+    cw.add("MOGN", bytes(mogn))
+    cw.add("MOGI", bytes(mogi))
     cw.add("MOSB", mosb)
     for name in ("MOPV", "MOPT", "MOPR", "MOVV", "MOVB", "MOLT", "MODS"):
         cw.add(name, root.payload(name))
@@ -280,12 +317,11 @@ def convert_wmo_root(data: bytes, source_name: str, opts: Options,
     out = cw.getvalue()
 
     res.bytes_out = len(out)
-    res.target_version = f"WMO root v{WMO_VERSION}, {root.n_groups} groups"
-    res.extra.update({"groups": root.n_groups, "materials": len(momt) // MOMT_SIZE,
+    res.target_version = f"WMO root v{WMO_VERSION}, {total_groups} groups"
+    res.extra.update({"groups": total_groups,
+                      "groups_before_split": root.n_groups,
+                      "materials": len(momt) // MOMT_SIZE,
                       "doodads": len(modd) // MODD_SIZE})
-
-    companions = _convert_groups(root, source_name, opts, source, res,
-                                 output_stem)
 
     if not modern and res.status is Status.OK:
         res.status = Status.PASSTHROUGH
@@ -296,10 +332,16 @@ def convert_wmo_root(data: bytes, source_name: str, opts: Options,
 
 def _convert_groups(root: WmoRoot, source_name: str, opts: Options,
                     source: AssetSource | None, result: FileResult,
-                    output_stem: str | None = None) -> list[ConvertedAsset]:
-    """Convert the group files, renaming them into ``<root>_NNN.wmo``."""
+                    output_stem: str | None = None
+                    ) -> tuple[list[ConvertedAsset], list[GroupAddition]]:
+    """Convert the group files, renaming them into ``<root>_NNN.wmo``.
+
+    A group too big for 16-bit indices becomes several; the first keeps the
+    original number and the rest are appended after every existing group, so
+    the numbering the root already uses stays put.
+    """
     if source is None or not opts.convert_companions:
-        return []
+        return [], []
 
     src_stem = os.path.splitext(os.path.basename(source_name))[0]
     stem = output_stem or src_stem
@@ -308,6 +350,8 @@ def _convert_groups(root: WmoRoot, source_name: str, opts: Options,
         if gfid else []
 
     out: list[ConvertedAsset] = []
+    additions: list[GroupAddition] = []
+    next_number = root.n_groups
     found = 0
     for index in range(root.n_groups):
         raw = None
@@ -320,14 +364,30 @@ def _convert_groups(root: WmoRoot, source_name: str, opts: Options,
         name = f"{stem}_{index:03d}.wmo"
         sub = FileResult(source=name, kind="wmo-group")
         try:
-            data, sub = convert_group(raw, name, opts, sub)
+            pieces, sub = convert_group_parts(raw, name, opts, sub)
         except Exception as exc:  # noqa: BLE001 - reported per file
             sub.fail("wmo.group.error", f"{type(exc).__name__}: {exc}")
             out.append(ConvertedAsset(name, b"", sub))
             continue
-        if sub.ok and data:
-            found += 1
-        out.append(ConvertedAsset(name, data, sub))
+        if not pieces:
+            out.append(ConvertedAsset(name, b"", sub))
+            continue
+
+        found += 1
+        out.append(ConvertedAsset(name, pieces[0].data, sub))
+        for piece in pieces[1:]:
+            extra_name = f"{stem}_{next_number:03d}.wmo"
+            extra = FileResult(source=extra_name, kind="wmo-group",
+                               status=sub.status)
+            extra.info("wmo.group.split_part",
+                       f"part {piece.part} of {name}, created because that "
+                       f"group had more vertices than 16-bit indices reach")
+            extra.bytes_out = len(piece.data)
+            out.append(ConvertedAsset(extra_name, piece.data, extra))
+            additions.append(GroupAddition(index, piece.bounding_box,
+                                           _group_flags(root, index),
+                                           f"{stem}_{next_number:03d}"))
+            next_number += 1
 
     if root.n_groups and found == 0:
         result.warn("wmo.group.missing",
@@ -338,7 +398,16 @@ def _convert_groups(root: WmoRoot, source_name: str, opts: Options,
         result.info("wmo.group.partial",
                     f"converted {found} of {root.n_groups} group file(s)",
                     found=found, expected=root.n_groups)
-    return out
+    return out, additions
+
+
+def _group_flags(root: WmoRoot, index: int) -> int:
+    """The MOGI flags of an existing group, for a part cloned from it."""
+    mogi = root.payload("MOGI")
+    at = index * MOGI_SIZE
+    if at + 4 > len(mogi):
+        return 0
+    return struct.unpack_from("<I", mogi, at)[0]
 
 
 def inspect_wmo_root(data: bytes, source_name: str) -> dict:

@@ -33,7 +33,6 @@ from ..limits import (
     M2_MAX_PARTICLE_BLEND_MODE,
     M2_MAX_SKIN_PROFILES,
     M2_MAX_TEXTURE_TYPE,
-    M2_MAX_VERTICES,
     M2_PARTICLE_FLAG_MASK,
     M2_PARTICLE_FLAG_MULTI_TEXTURE,
     M2_SOFT_MAX_BONES,
@@ -429,12 +428,9 @@ def report_dropped_chunks(model: M2Model, result: FileResult) -> None:
 
 
 def validate(model: M2Model, opts: Options, result: FileResult) -> None:
-    if model.vertex_count > M2_MAX_VERTICES:
-        result.fail("m2.limit.vertices",
-                    f"{model.vertex_count} vertices exceeds the {M2_MAX_VERTICES} "
-                    f"a .skin file can index with 16-bit indices; the mesh must "
-                    f"be split before it can run on 3.3.5a",
-                    vertices=model.vertex_count)
+    # The vertex limit is checked later, in wotlkconv.m2.split: dropping
+    # geometry no submesh draws often brings a model back under it on its own,
+    # and that needs the skin profiles, which are loaded after the downgrade.
     if len(model.bones) > M2_SOFT_MAX_BONES:
         msg = (f"{len(model.bones)} bones is above the {M2_SOFT_MAX_BONES} the "
                f"3.3.5a renderer keeps matrix slots for; the model may render "

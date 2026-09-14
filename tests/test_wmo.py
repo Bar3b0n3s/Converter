@@ -196,7 +196,7 @@ def test_split_group_indices_are_cleared(wmo_group, opts):
     group = parse_group(out, "g")
     assert group.flags2 == 0
     assert struct.unpack_from("<I", group.header, 0x40)[0] == 0
-    assert any(n.code == "wmo.group.split" for n in res.notes)
+    assert any(n.code == "wmo.group.split_index" for n in res.notes)
 
 
 def test_batch_bounds_are_recomputed_for_shadowlands_layout(wmo_group, opts):
@@ -232,7 +232,7 @@ def test_a_wrath_group_is_passed_through(opts):
     assert res.status is Status.PASSTHROUGH
 
 
-def test_too_many_vertices_is_a_hard_failure(opts):
+def test_an_index_past_the_vertex_array_is_a_hard_failure(opts):
     raw = bytearray(F.build_modern_wmo_group(wide_indices=True))
     # Sub-chunk offsets are relative to the MOGP payload, so rebase onto the file.
     mogp = next(c for c in ChunkReader(bytes(raw), reverse=True) if c.name == "MOGP")
@@ -241,7 +241,7 @@ def test_too_many_vertices_is_a_hard_failure(opts):
     struct.pack_into("<I", raw, mogp.offset + movx.offset, 70000)
     out, res = convert_group(bytes(raw), "g.wmo", opts)
     assert res.status is Status.FAILED and out == b""
-    assert any(n.code == "wmo.group.indices" for n in res.notes)
+    assert any(n.code == "wmo.group.bad_index" for n in res.notes)
 
 
 def test_inspect_group_lists_modern_subchunks(wmo_group):

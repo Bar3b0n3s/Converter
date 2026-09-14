@@ -93,6 +93,13 @@ class Options:
     # -- world ----------------------------------------------------------
     #: Merge Cataclysm+ split ADTs (_obj0/_tex0) back into one monolithic file.
     merge_split_adt: bool = True
+    #: Split a WMO group that outgrew 16-bit indices into several groups, with
+    #: the root updated to reference them. Self-contained, so on by default.
+    split_oversized_groups: bool = True
+    #: Split a model that outgrew 16-bit indices into several .m2 files. Off by
+    #: default: the extra files are new assets nothing references yet, so the
+    #: user has to place them.
+    split_oversized_models: bool = False
 
     def texture_ext_cap(self) -> int:
         return self.max_texture_size if self.max_texture_size > 0 else 1 << 30

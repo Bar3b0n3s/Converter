@@ -4,8 +4,9 @@ A group is ``MVER`` plus one ``MOGP`` whose payload is a 68-byte header
 followed by sub-chunks.  The header size never changed, so the work is in the
 sub-chunks:
 
-* ``MOVX`` (32-bit indices) has to become ``MOVI`` (16-bit), which is only
-  possible if the group stays under 65536 vertices.
+* ``MOVX`` (32-bit indices) has to become ``MOVI`` (16-bit). When the group
+  has more than 65 536 vertices that is impossible, and the group is split into
+  several -- see :mod:`wotlkconv.wmo.split`.
 * ``MPY2`` (16-bit material ids) has to become ``MOPY`` (8-bit).
 * Extra ``MOTV``/``MOCV`` layers beyond the two the old renderer binds are
   dropped, and the header flags that advertise them are corrected to match.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import struct
+from typing import Sequence
 
 from ..chunks import Chunk, ChunkReader, ChunkWriter
 from ..errors import MalformedFileError, UnsupportedFormatError
@@ -36,6 +38,7 @@ from ..limits import (
 )
 from ..options import Options
 from ..report import FileResult, Status
+from . import split as splitter
 
 #: Sub-chunks 3.3.5a reads, in emission order.
 GROUP_SUBCHUNK_ORDER = (
@@ -124,21 +127,17 @@ def parse_group(data: bytes, name: str = "<wmo group>") -> WmoGroup:
 # ---------------------------------------------------------------------------
 # Sub-chunk downgrades
 # ---------------------------------------------------------------------------
-def _convert_indices(payload: bytes, result: FileResult, name: str) -> bytes | None:
-    """MOVX (uint32) -> MOVI (uint16)."""
-    count = len(payload) // 4
-    indices = struct.unpack_from("<" + "I" * count, payload, 0) if count else ()
-    biggest = max(indices, default=0)
-    if biggest > WMO_MAX_GROUP_VERTICES:
-        result.fail("wmo.group.indices",
-                    f"{name} uses 32-bit triangle indices reaching {biggest}; "
-                    f"3.3.5a groups are limited to {WMO_MAX_GROUP_VERTICES} "
-                    f"vertices and the group must be split first",
-                    max_index=biggest)
-        return None
-    result.lossy("wmo.group.movx",
-                 f"converted {count} 32-bit indices to 16-bit MOVI", indices=count)
-    return struct.pack("<" + "H" * count, *indices) if count else b""
+def _read_indices(by_name: dict[str, list[bytes]]) -> list[int]:
+    """Triangle indices as plain ints, whatever width they were stored at."""
+    if "MOVI" in by_name:
+        payload = by_name["MOVI"][0]
+        count = len(payload) // 2
+        return list(struct.unpack_from("<" + "H" * count, payload, 0)) if count else []
+    if "MOVX" in by_name:
+        payload = by_name["MOVX"][0]
+        count = len(payload) // 4
+        return list(struct.unpack_from("<" + "I" * count, payload, 0)) if count else []
+    return []
 
 
 def _convert_poly(payload: bytes, triangle_count: int, result: FileResult,
@@ -218,9 +217,59 @@ def _recompute_batch_bounds(moba: bytes, vertices: bytes, indices: bytes,
     return bytes(out)
 
 
-def convert_group(data: bytes, source_name: str, opts: Options,
-                  result: FileResult | None = None) -> tuple[bytes, FileResult]:
-    """Downgrade one WMO group file."""
+@dataclasses.dataclass(slots=True)
+class GroupFile:
+    """One group file produced from a source group."""
+
+    data: bytes
+    bounding_box: tuple = (0.0,) * 6
+    flags: int = 0
+    vertices: int = 0
+    triangles: int = 0
+    #: 0 for the original group, 1.. for the extra groups a split produced.
+    part: int = 0
+
+
+def _emit_group(header: bytearray, reverse: bool, *, polys: bytes,
+                indices: Sequence[int], vertices: bytes, normals: bytes,
+                uvs: Sequence[bytes], batches: bytes, colours: Sequence[bytes],
+                extras: dict[str, bytes], mobn: bytes = b"",
+                mobr: bytes = b"") -> bytes:
+    """Write one MVER + MOGP group file from already-prepared arrays."""
+    inner = ChunkWriter(reverse=reverse)
+    if polys:
+        inner.add("MOPY", polys)
+    if indices:
+        inner.add("MOVI", struct.pack("<" + "H" * len(indices), *indices))
+    if vertices:
+        inner.add("MOVT", vertices)
+    if normals:
+        inner.add("MONR", normals)
+    for uv in uvs:
+        inner.add("MOTV", uv)
+    if batches:
+        inner.add("MOBA", batches)
+    for name in ("MOLR", "MODR"):
+        if extras.get(name):
+            inner.add(name, extras[name])
+    if mobn:
+        inner.add("MOBN", mobn)
+        inner.add("MOBR", mobr)
+    for colour in colours:
+        inner.add("MOCV", colour)
+    if extras.get("MLIQ"):
+        inner.add("MLIQ", extras["MLIQ"])
+
+    outer = ChunkWriter(reverse=reverse)
+    outer.add("MVER", struct.pack("<I", WMO_VERSION))
+    outer.add("MOGP", bytes(header) + inner.getvalue())
+    return outer.getvalue()
+
+
+def convert_group_parts(data: bytes, source_name: str, opts: Options,
+                        result: FileResult | None = None
+                        ) -> tuple[list[GroupFile], FileResult]:
+    """Downgrade one group, splitting it when it cannot fit 16-bit indices."""
     res = result or FileResult(source=source_name, kind="wmo-group")
     res.kind = "wmo-group"
     res.bytes_in = len(data)
@@ -236,126 +285,176 @@ def convert_group(data: bytes, source_name: str, opts: Options,
     modern_seen = sorted(n for n in by_name if n in MODERN_GROUP_CHUNKS)
     had_wide_materials = "MPY2" in by_name
 
-    # -- indices --------------------------------------------------------
-    indices = b""
-    if "MOVI" in by_name:
-        indices = by_name["MOVI"][0]
-    elif "MOVX" in by_name:
-        converted = _convert_indices(by_name["MOVX"][0], res, source_name)
-        if converted is None:
-            return b"", res
-        indices = converted
+    indices = _read_indices(by_name)
+    if "MOVX" in by_name:
+        res.lossy("wmo.group.movx",
+                  f"converted {len(indices)} 32-bit indices to 16-bit MOVI",
+                  indices=len(indices))
 
-    # -- polygons -------------------------------------------------------
-    triangle_count = len(indices) // 6
+    triangle_count = len(indices) // 3
     polys = b""
     if "MOPY" in by_name:
         polys = by_name["MOPY"][0]
     elif "MPY2" in by_name:
-        converted = _convert_poly(by_name["MPY2"][0], triangle_count, res, source_name)
+        converted = _convert_poly(by_name["MPY2"][0], triangle_count, res,
+                                  source_name)
         if converted is None:
-            return b"", res
+            return [], res
         polys = converted
 
     vertices = by_name.get("MOVT", [b""])[0]
-    if len(vertices) // 12 > WMO_MAX_GROUP_VERTICES:
-        res.fail("wmo.group.vertices",
-                 f"{len(vertices) // 12} vertices exceeds the "
-                 f"{WMO_MAX_GROUP_VERTICES} a 3.3.5a group can index",
-                 vertices=len(vertices) // 12)
-        return b"", res
+    vertex_count = len(vertices) // 12
 
-    # -- batches --------------------------------------------------------
     batches = by_name.get("MOBA", [b""])[0]
     if batches and had_wide_materials and vertices and indices:
-        batches = _recompute_batch_bounds(batches, vertices, indices, res)
+        narrow = struct.pack("<" + "H" * len(indices),
+                             *(min(i, 0xFFFF) for i in indices))
+        batches = _recompute_batch_bounds(batches, vertices, narrow, res)
 
-    # -- layered chunks -------------------------------------------------
     uvs = by_name.get("MOTV", [])
-    colors = by_name.get("MOCV", [])
+    colours = by_name.get("MOCV", [])
     if len(uvs) > WMO_MAX_UV_LAYERS:
         res.lossy("wmo.group.uv_layers",
                   f"dropped {len(uvs) - WMO_MAX_UV_LAYERS} UV layer(s); 3.3.5a "
                   f"binds at most {WMO_MAX_UV_LAYERS}", layers=len(uvs))
         uvs = uvs[:WMO_MAX_UV_LAYERS]
-    if len(colors) > WMO_MAX_COLOR_LAYERS:
+    if len(colours) > WMO_MAX_COLOR_LAYERS:
         res.lossy("wmo.group.color_layers",
-                  f"dropped {len(colors) - WMO_MAX_COLOR_LAYERS} vertex-colour "
-                  f"layer(s)", layers=len(colors))
-        colors = colors[:WMO_MAX_COLOR_LAYERS]
+                  f"dropped {len(colours) - WMO_MAX_COLOR_LAYERS} vertex-colour "
+                  f"layer(s)", layers=len(colours))
+        colours = colours[:WMO_MAX_COLOR_LAYERS]
 
-    # -- header ---------------------------------------------------------
-    flags = group.flags
-    original_flags = flags
-    flags &= WMO_GROUP_FLAG_MASK
-    if len(uvs) >= 2:
-        flags |= WMO_GROUP_FLAG_HAS_TWO_MOTV
-    else:
-        flags &= ~WMO_GROUP_FLAG_HAS_TWO_MOTV
-    if len(colors) >= 2:
-        flags |= WMO_GROUP_FLAG_HAS_TWO_MOCV
-    else:
-        flags &= ~WMO_GROUP_FLAG_HAS_TWO_MOCV
-    if colors:
-        flags |= WMO_GROUP_FLAG_HAS_VERTEX_COLORS
-    else:
-        flags &= ~WMO_GROUP_FLAG_HAS_VERTEX_COLORS
-    if flags != original_flags:
-        res.info("wmo.group.flags",
-                 f"group flags 0x{original_flags:08X} -> 0x{flags:08X}")
-    group.flags = flags
-
-    if group.flags2 or struct.unpack_from("<I", group.header, 0x40)[0]:
-        # Wrath has no flags2 and ignores the last word; Legion's split-group
-        # indices would read as a huge unknown value.
-        struct.pack_into("<II", group.header, 0x3C, 0, 0)
-        res.info("wmo.group.split",
-                 "cleared Legion split-group indices from the MOGP header")
+    header = _fix_header(group, uvs, colours, res)
+    extras = {name: by_name[name][0] for name in ("MOLR", "MODR", "MLIQ")
+              if name in by_name}
 
     if modern_seen:
         dropped = [n for n in modern_seen if n not in ("MOVX", "MPY2")]
         if dropped:
             res.lossy("wmo.group.chunks_dropped",
                       "dropped group chunks with no 3.3.5a equivalent: "
-                      + ", ".join(f"{n} ({MODERN_GROUP_CHUNKS[n]})" for n in dropped),
+                      + ", ".join(f"{n} ({MODERN_GROUP_CHUNKS[n]})"
+                                  for n in dropped),
                       chunks=dropped)
 
-    # -- rebuild --------------------------------------------------------
-    inner = ChunkWriter(reverse=group.reverse_magic)
-    emit: list[tuple[str, bytes]] = []
-    if polys:
-        emit.append(("MOPY", polys))
-    if indices:
-        emit.append(("MOVI", indices))
-    if vertices:
-        emit.append(("MOVT", vertices))
-    for name in ("MONR",):
-        if name in by_name:
-            emit.append((name, by_name[name][0]))
-    for uv in uvs:
-        emit.append(("MOTV", uv))
-    if batches:
-        emit.append(("MOBA", batches))
-    for name in ("MOLR", "MODR", "MOBN", "MOBR"):
-        if name in by_name:
-            emit.append((name, by_name[name][0]))
-    for colour in colors:
-        emit.append(("MOCV", colour))
-    if "MLIQ" in by_name:
-        emit.append(("MLIQ", by_name["MLIQ"][0]))
-    inner.extend(emit)
+    biggest = max(indices, default=-1)
+    if vertex_count and biggest >= vertex_count:
+        res.fail("wmo.group.bad_index",
+                 f"a triangle references vertex {biggest} but the group only "
+                 f"has {vertex_count}; the group is corrupt",
+                 max_index=biggest, vertices=vertex_count)
+        return [], res
 
-    outer = ChunkWriter(reverse=group.reverse_magic)
-    outer.add("MVER", struct.pack("<I", WMO_VERSION))
-    outer.add("MOGP", bytes(group.header) + inner.getvalue())
-    out = outer.getvalue()
+    oversized = vertex_count > WMO_MAX_GROUP_VERTICES
 
-    res.bytes_out = len(out)
-    res.target_version = f"WMO group v{WMO_VERSION}, {len(emit)} sub-chunks"
-    if not modern_seen and res.status is Status.OK:
-        res.status = Status.PASSTHROUGH
-        res.info("wmo.group.passthrough", "already a 3.3.5a group layout")
-    return out, res
+    if not oversized:
+        out = _emit_group(header, group.reverse_magic, polys=polys,
+                          indices=indices, vertices=vertices,
+                          normals=by_name.get("MONR", [b""])[0], uvs=uvs,
+                          batches=batches, colours=colours, extras=extras,
+                          mobn=by_name.get("MOBN", [b""])[0],
+                          mobr=by_name.get("MOBR", [b""])[0])
+        res.bytes_out = len(out)
+        res.target_version = f"WMO group v{WMO_VERSION}, {vertex_count} vertices"
+        if not modern_seen and res.status is Status.OK:
+            res.status = Status.PASSTHROUGH
+            res.info("wmo.group.passthrough", "already a 3.3.5a group layout")
+        return [GroupFile(out, _bounds_of(header), group.flags, vertex_count,
+                          triangle_count, 0)], res
+
+    if not opts.split_oversized_groups:
+        res.fail("wmo.group.indices",
+                 f"{vertex_count} vertices exceeds the "
+                 f"{WMO_MAX_GROUP_VERTICES} a 3.3.5a group can index, and "
+                 f"--no-split-groups was given",
+                 vertices=vertex_count)
+        return [], res
+
+    geo = splitter.unpack(vertices, by_name.get("MONR", [b""])[0], uvs, colours,
+                          indices, polys, batches)
+    pieces = splitter.split(geo)
+    res.lossy("wmo.group.split",
+              f"{vertex_count} vertices exceeds the "
+              f"{WMO_MAX_GROUP_VERTICES} a 3.3.5a group can index, so the "
+              f"group was split into {len(pieces)} and their collision trees "
+              f"rebuilt",
+              vertices=vertex_count, parts=len(pieces))
+
+    out_files: list[GroupFile] = []
+    for number, piece in enumerate(pieces):
+        piece_header = bytearray(header)
+        struct.pack_into("<6f", piece_header, 12, *piece.bounding_box)
+        # Liquid is a grid over the original group; duplicating it would render
+        # the water several times over, so it stays with the first part.
+        piece_extras = dict(extras) if number == 0 else \
+            {k: v for k, v in extras.items() if k != "MLIQ"}
+        out = _emit_group(piece_header, group.reverse_magic, polys=piece.polys,
+                          indices=piece.indices, vertices=piece.vertices,
+                          normals=piece.normals, uvs=piece.uvs,
+                          batches=piece.batches, colours=piece.colors,
+                          extras=piece_extras, mobn=piece.mobn, mobr=piece.mobr)
+        out_files.append(GroupFile(out, piece.bounding_box,
+                                   struct.unpack_from("<I", piece_header, 8)[0],
+                                   piece.vertex_count, piece.triangle_count,
+                                   number))
+
+    res.bytes_out = sum(len(f.data) for f in out_files)
+    res.target_version = (f"WMO group v{WMO_VERSION}, {len(out_files)} part(s), "
+                          f"{vertex_count} vertices")
+    res.extra["parts"] = len(out_files)
+    return out_files, res
+
+
+def _bounds_of(header: bytes) -> tuple:
+    return struct.unpack_from("<6f", header, 12)
+
+
+def _fix_header(group: WmoGroup, uvs: Sequence[bytes], colours: Sequence[bytes],
+                res: FileResult) -> bytearray:
+    """Mask the flags and make the layer bits describe what actually survived."""
+    flags = group.flags
+    original = flags
+    flags &= WMO_GROUP_FLAG_MASK
+    if len(uvs) >= 2:
+        flags |= WMO_GROUP_FLAG_HAS_TWO_MOTV
+    else:
+        flags &= ~WMO_GROUP_FLAG_HAS_TWO_MOTV
+    if len(colours) >= 2:
+        flags |= WMO_GROUP_FLAG_HAS_TWO_MOCV
+    else:
+        flags &= ~WMO_GROUP_FLAG_HAS_TWO_MOCV
+    if colours:
+        flags |= WMO_GROUP_FLAG_HAS_VERTEX_COLORS
+    else:
+        flags &= ~WMO_GROUP_FLAG_HAS_VERTEX_COLORS
+    if flags != original:
+        res.info("wmo.group.flags",
+                 f"group flags 0x{original:08X} -> 0x{flags:08X}")
+    group.flags = flags
+
+    header = bytearray(group.header)
+    if struct.unpack_from("<I", header, 0x3C)[0] or \
+            struct.unpack_from("<I", header, 0x40)[0]:
+        # Wrath has no flags2 and reads the last word as padding; Legion's
+        # split-group indices would show up there as a huge unknown value.
+        struct.pack_into("<II", header, 0x3C, 0, 0)
+        res.info("wmo.group.split_index",
+                 "cleared Legion split-group indices from the MOGP header")
+    return header
+
+
+def convert_group(data: bytes, source_name: str, opts: Options,
+                  result: FileResult | None = None) -> tuple[bytes, FileResult]:
+    """Downgrade one group file, keeping only the first part of any split."""
+    parts, res = convert_group_parts(data, source_name, opts, result)
+    if not parts:
+        return b"", res
+    if len(parts) > 1:
+        res.warn("wmo.group.parts_dropped",
+                 f"this group split into {len(parts)}, but only the first is "
+                 f"returned here; convert the WMO through its root so the "
+                 f"extra groups are registered")
+    return parts[0].data, res
 
 
 def inspect_group(data: bytes, source_name: str) -> dict:

@@ -693,3 +693,138 @@ def build_modern_wdt(*, tiles=((32, 48), (33, 48)), flags: int = 0x0201,
         cw.add("MODF", bytes(64))
     cw.add("MPL2", bytes(24))
     return cw.getvalue()
+
+
+def build_oversized_wmo_group(*, vertices: int = 70000, strips: int = 4) -> bytes:
+    """A Shadowlands group with more vertices than 16-bit indices can reach.
+
+    The geometry is a set of disjoint triangle strips so a splitter has natural
+    seams to cut along, and each strip is covered by its own render batch.
+    """
+    import math
+
+    inner = ChunkWriter(reverse=WMO_CHUNKS_REVERSED)
+
+    per_strip = vertices // strips
+    verts = bytearray()
+    normals = bytearray()
+    uvs = bytearray()
+    colours = bytearray()
+    triangles: list[tuple[int, int, int]] = []
+    strip_ranges: list[tuple[int, int]] = []
+
+    for strip in range(strips):
+        base = strip * per_strip
+        first_triangle = len(triangles)
+        for i in range(per_strip):
+            angle = (i / per_strip) * math.tau
+            verts += struct.pack("<3f", math.cos(angle) * (10 + strip * 20),
+                                 math.sin(angle) * (10 + strip * 20),
+                                 float(i % 17))
+            normals += struct.pack("<3f", 0.0, 0.0, 1.0)
+            uvs += struct.pack("<2f", i / per_strip, 0.0)
+            colours += struct.pack("<4B", 255, 255, 255, 255)
+        for i in range(per_strip - 2):
+            triangles.append((base + i, base + i + 1, base + i + 2))
+        strip_ranges.append((first_triangle, len(triangles)))
+
+    index_words = []
+    for tri in triangles:
+        index_words.extend(tri)
+    inner.add("MPY2", b"".join(struct.pack("<HH", 0x20, 1)
+                               for _ in triangles))
+    inner.add("MOVX", struct.pack("<" + "I" * len(index_words), *index_words))
+    inner.add("MOVT", bytes(verts))
+    inner.add("MONR", bytes(normals))
+    inner.add("MOTV", bytes(uvs))
+
+    moba = bytearray()
+    for first, last in strip_ranges:
+        record = bytearray(24)
+        struct.pack_into("<6h", record, 0, -1, -1, -1, 1, 1, 1)
+        struct.pack_into("<IHHH", record, 12, first * 3, (last - first) * 3,
+                         0, per_strip - 1)
+        record[23] = 1
+        moba += record
+    inner.add("MOBA", bytes(moba))
+    inner.add("MOCV", bytes(colours))
+    inner.add("MODR", struct.pack("<HH", 0, 1))
+
+    header = bytearray(68)
+    struct.pack_into("<I", header, 8, 0x8 | 0x4 | 0x800)
+    struct.pack_into("<6f", header, 12, -100.0, -100.0, 0.0, 100.0, 100.0, 20.0)
+    struct.pack_into("<I", header, 0x34, 0xFFFFFFFF)
+
+    outer = ChunkWriter(reverse=WMO_CHUNKS_REVERSED)
+    outer.add("MVER", struct.pack("<I", 17))
+    outer.add("MOGP", bytes(header) + inner.getvalue())
+    return outer.getvalue()
+
+
+def build_model_vertices(count: int) -> bytes:
+    """``count`` M2Vertex records laid out along a line."""
+    out = bytearray()
+    for i in range(count):
+        out += struct.pack("<3f4B4B3f4f",
+                           float(i % 997), float((i // 997) % 97), float(i % 13),
+                           255, 0, 0, 0, 0, 0, 0, 0,
+                           0.0, 0.0, 1.0,
+                           (i % 64) / 64.0, 0.0, 0.0, 0.0)
+    return bytes(out)
+
+
+def build_skin_for(submesh_vertex_lists, *, legion: bool = False,
+                   bone_count_max: int = 4) -> bytes:
+    """A .skin whose submeshes reference the given model vertex indices.
+
+    Each entry of ``submesh_vertex_lists`` is the list of model vertex indices
+    one submesh draws; triangles are generated over them in order.
+    """
+    vertices: list[int] = []
+    indices: list[int] = []
+    submeshes = []
+    batches = []
+
+    for submesh_index, model_vertices in enumerate(submesh_vertex_lists):
+        vertex_start = len(vertices)
+        vertices.extend(model_vertices)
+        index_start = len(indices)
+        for i in range(len(model_vertices) - 2):
+            indices.extend((vertex_start + i, vertex_start + i + 1,
+                            vertex_start + i + 2))
+        # Level carries the high 16 bits of indexStart.
+        submeshes.append(struct.pack(
+            "<10H3f3ff", submesh_index, index_start >> 16, vertex_start,
+            len(model_vertices), index_start & 0xFFFF,
+            len(indices) - index_start, 1, 0, 1, 0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+        batches.append(struct.pack(
+            "<BbHHHHHHHHHHH", 0, 0, 0, submesh_index, 0, 0, 0, 0, 1, 0, 0, 0, 0))
+
+    header_size = 56 if legion else 48
+    payload = bytearray()
+    offsets = {}
+
+    def place(name: str, blob: bytes) -> None:
+        while len(payload) % 4:
+            payload.append(0)
+        offsets[name] = header_size + len(payload)
+        payload.extend(blob)
+
+    place("vertices", struct.pack("<" + "H" * len(vertices), *vertices))
+    place("indices", struct.pack("<" + "H" * len(indices), *indices))
+    place("bones", bytes(len(vertices) * 4))
+    place("submeshes", b"".join(submeshes))
+    place("batches", b"".join(batches))
+
+    head = bytearray(SKIN_MAGIC.encode("latin-1"))
+    head += struct.pack("<II", len(vertices), offsets["vertices"])
+    head += struct.pack("<II", len(indices), offsets["indices"])
+    head += struct.pack("<II", len(vertices), offsets["bones"])
+    head += struct.pack("<II", len(submeshes), offsets["submeshes"])
+    head += struct.pack("<II", len(batches), offsets["batches"])
+    head += struct.pack("<I", bone_count_max)
+    if legion:
+        head += struct.pack("<II", 0, 0)
+    assert len(head) == header_size
+    return bytes(head) + bytes(payload)
