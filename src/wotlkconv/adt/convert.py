@@ -19,11 +19,25 @@ places, and recomputing every offset:
 
 Cataclysm's high-resolution 8x8 hole mask is folded down to the 4x4 mask Wrath
 renders, and the chunks that only exist after Wrath are dropped.
+
+One detail of ``MCIN`` has two readings.  Each entry gives the file offset of
+an ``MCNK`` and a size, and the size is either the chunk's payload or that
+payload plus the 8-byte chunk header.  The offset is unambiguous -- it points
+at the header -- so a reader that seeks there and then trusts the chunk's own
+size field, as the client does, cannot be misled either way; only a tool that
+takes ``MCIN``'s size as the extent of the chunk can be.  For that reader the
+header-inclusive value is the safe one: it spans the whole chunk, where the
+payload-only value would stop 8 bytes short and cut off the end of the last
+sub-chunk.  So that is the default.  It is not left as a guess, though: point
+``--reference-adt`` at any genuine 3.3.5a tile and the convention is read off
+it directly, by comparing each entry's size against the size the chunk itself
+declares.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 import struct
 import time
 
@@ -37,6 +51,10 @@ from ..report import FileResult, Status
 MCNK_HEADER_SIZE = 128
 MCIN_ENTRY_SIZE = 16
 MHDR_SIZE = 64
+
+#: How much an MCIN entry's size field covers.  See the module docstring.
+MCIN_SIZE_WITH_HEADER = "chunk"
+MCIN_SIZE_PAYLOAD_ONLY = "payload"
 
 #: MCNK.flags bit meaning "the 8 bytes at 0x40 are an 8x8 hole mask".
 MCNK_FLAG_HIGH_RES_HOLES = 0x10000
@@ -105,6 +123,51 @@ def _collect(data: bytes, name: str) -> tuple[dict[str, list[Chunk]], list[Chunk
 def _payload(named: dict[str, list[Chunk]], key: str) -> bytes:
     entries = named.get(key)
     return entries[0].data if entries else b""
+
+
+def mcin_size_convention(data: bytes, name: str = "<adt>") -> tuple[str, str]:
+    """Read off a real tile whether MCIN sizes include the chunk header.
+
+    Every entry names an offset and a size, and the chunk sitting at that
+    offset declares its own size eight bytes in.  Comparing the two says which
+    convention wrote the file, with no interpretation left over.  Returns the
+    convention and a sentence about the evidence, or ``("", why not)``.
+    """
+    reader = ChunkReader.auto(data, {"MVER", "MHDR", "MCNK", "MTEX", "MCIN"},
+                              name=name)
+    mcin = None
+    for chunk in reader:
+        if chunk.name == "MCIN":
+            mcin = chunk
+            break
+    if mcin is None:
+        return "", (f"{name} has no MCIN, so it is not a 3.3.5a tile "
+                    f"(Cataclysm and later dropped the chunk)")
+
+    votes = {MCIN_SIZE_WITH_HEADER: 0, MCIN_SIZE_PAYLOAD_ONLY: 0}
+    checked = 0
+    for i in range(min(ADT_MCNK_COUNT, len(mcin.data) // MCIN_ENTRY_SIZE)):
+        offset, size = struct.unpack_from("<II", mcin.data, i * MCIN_ENTRY_SIZE)
+        if not offset or not size or offset + 8 > len(data):
+            continue
+        declared = struct.unpack_from("<I", data, offset + 4)[0]
+        checked += 1
+        if size == declared + 8:
+            votes[MCIN_SIZE_WITH_HEADER] += 1
+        elif size == declared:
+            votes[MCIN_SIZE_PAYLOAD_ONLY] += 1
+
+    if not checked:
+        return "", f"{name}'s MCIN entries are empty, so they settle nothing"
+    winner = max(votes, key=lambda k: votes[k])
+    if votes[winner] != checked:
+        return "", (f"{name} is inconsistent with itself: of {checked} MCIN "
+                    f"entries, {votes[MCIN_SIZE_WITH_HEADER]} include the "
+                    f"chunk header in their size and "
+                    f"{votes[MCIN_SIZE_PAYLOAD_ONLY]} do not")
+    covers = ("the chunk header as well as the payload"
+              if winner == MCIN_SIZE_WITH_HEADER else "the payload alone")
+    return winner, (f"all {checked} of {name}'s MCIN entries size {covers}")
 
 
 def _subchunks(data: bytes, reverse: bool, start: int = 0) -> dict[str, bytes]:
@@ -236,6 +299,18 @@ def _build_mcnk(header: bytes, pieces: dict[str, bytes], reverse: bool,
     return bytes(hdr) + body.getvalue()
 
 
+def _learn_mcin(path: str, res: FileResult) -> tuple[str, str]:
+    """Read the MCIN convention off a reference tile, if it can be read."""
+    try:
+        data = pathlib.Path(path).read_bytes()
+    except OSError as exc:
+        return "", f"could not read the reference tile {path}: {exc}"
+    try:
+        return mcin_size_convention(data, pathlib.Path(path).name)
+    except (MalformedFileError, UnsupportedFormatError, struct.error) as exc:
+        return "", f"could not read {path} as an ADT: {exc}"
+
+
 def convert_adt(parts: AdtParts, source_name: str, opts: Options,
                 listfile: Listfile | None = None,
                 result: FileResult | None = None) -> tuple[bytes, FileResult]:
@@ -248,6 +323,19 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
 
     if not parts.root:
         raise MalformedFileError(f"{source_name}: no terrain (root) ADT supplied")
+
+    mcin_convention = MCIN_SIZE_WITH_HEADER
+    if opts.adt_reference:
+        learned, why = _learn_mcin(opts.adt_reference, res)
+        if learned:
+            mcin_convention = learned
+            res.info("adt.mcin.learned",
+                     f"MCIN entry sizes follow the reference tile: {why}")
+        elif why:
+            res.warn("adt.mcin.reference_unusable",
+                     f"{why}; kept the header-inclusive size, which is safe "
+                     f"for a reader that trusts MCIN over the chunk's own "
+                     f"header")
 
     root_named, root_mcnks = _collect(parts.root, source_name)
     tex_named, tex_mcnks = _collect(parts.tex0, source_name + "_tex0")
@@ -354,8 +442,10 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
         out.extend(struct.pack("<I", len(payload)))
         out.extend(payload)
         if index < ADT_MCNK_COUNT:
+            entry_size = len(payload) + (8 if mcin_convention ==
+                                         MCIN_SIZE_WITH_HEADER else 0)
             struct.pack_into("<4I", out, mcin_data_pos + index * MCIN_ENTRY_SIZE,
-                             chunk_pos, len(payload) + 8, 0, 0)
+                             chunk_pos, entry_size, 0, 0)
 
     append("MFBO", tables["MFBO"])
     append("MTXF", tables["MTXF"])

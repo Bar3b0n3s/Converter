@@ -78,6 +78,9 @@ class Options:
     # -- client databases -------------------------------------------------
     #: Directory of user mapping JSON files, taking precedence over built-ins.
     db_mappings: str = ""
+    #: A genuine 3.3.5a ``.adt`` to read file conventions off, rather than
+    #: relying on the documented default.  See ``adt.convert``.
+    adt_reference: str = ""
     #: Directory searched for ``<Table>.dbc`` templates.
     db_templates: str = ""
     #: Append to the template's rows rather than starting a fresh table.

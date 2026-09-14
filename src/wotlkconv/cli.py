@@ -193,6 +193,9 @@ examples:
                      help="treat exceeding a 3.3.5a soft limit as an error")
     mdl.add_argument("--no-merge-adt", action="store_true",
                      help="do not merge split terrain tiles")
+    mdl.add_argument("--reference-adt", metavar="PATH",
+                     help="a genuine 3.3.5a .adt to read file conventions "
+                          "off, instead of relying on the documented default")
     mdl.add_argument("--no-split-groups", action="store_true",
                      help="fail on a WMO group with more vertices than 16-bit "
                           "indices reach, instead of splitting it into several "
@@ -316,6 +319,7 @@ def _options_from(args: argparse.Namespace) -> Options:
         allow_missing_skeleton=args.allow_missing_skeleton,
         convert_companions=not args.no_companions,
         merge_split_adt=not args.no_merge_adt,
+        adt_reference=getattr(args, "reference_adt", "") or "",
         split_oversized_groups=not args.no_split_groups,
         split_oversized_models=args.split_models,
         copy_unconverted=not args.no_copy_unconverted,

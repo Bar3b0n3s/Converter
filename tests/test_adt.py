@@ -3,11 +3,14 @@ import struct
 import pytest
 
 import fixtures as F
-from wotlkconv.adt.convert import (AdtParts, MCIN_ENTRY_SIZE, MCNK_HEADER_SIZE,
-                                   _fold_holes, convert_adt, inspect_adt)
+from wotlkconv.adt.convert import (AdtParts, MCIN_ENTRY_SIZE, MCIN_SIZE_PAYLOAD_ONLY,
+                                   MCIN_SIZE_WITH_HEADER, MCNK_HEADER_SIZE,
+                                   _fold_holes, convert_adt, inspect_adt,
+                                   mcin_size_convention)
 from wotlkconv.chunks import ChunkReader
 from wotlkconv.errors import MalformedFileError, UnsupportedFormatError
 from wotlkconv.limits import ADT_VERSION
+from wotlkconv.listfile import Listfile
 from wotlkconv.options import Options
 from wotlkconv.report import Status
 
@@ -223,3 +226,92 @@ def test_unresolved_terrain_textures_can_fail_the_tile(split_tile):
                            Options(unresolved=UnresolvedPolicy.FAIL), Listfile())
     assert res.status is Status.FAILED and out == b""
     assert any(n.code == "adt.texture.unresolved" for n in res.notes)
+
+
+# ---------------------------------------------------------------------------
+# What an MCIN entry's size covers
+# ---------------------------------------------------------------------------
+def _converted_tile(**opts):
+    root, tex, obj = F.build_split_adt(chunks=4)
+    out, res = convert_adt(AdtParts(root, tex, obj), "t.adt", Options(**opts),
+                           Listfile())
+    return out, res
+
+
+def test_a_tile_we_write_reads_back_as_its_own_reference():
+    """The detector and the writer have to agree, or one of them is wrong."""
+    out, _res = _converted_tile()
+    convention, why = mcin_size_convention(out, "t.adt")
+    assert convention == MCIN_SIZE_WITH_HEADER
+    assert "header as well as the payload" in why
+
+
+def test_mcin_sizes_span_the_whole_chunk_by_default():
+    """Header-inclusive, so a reader trusting MCIN sees the last sub-chunk."""
+    out, _res = _converted_tile()
+    mcin = _chunk_payload(out, "MCIN")
+    offset, size = struct.unpack_from("<II", mcin, 0)
+    declared = struct.unpack_from("<I", out, offset + 4)[0]
+    assert size == declared + 8
+
+
+def test_a_reference_tile_can_override_the_default(tmp_path):
+    """A real 3.3.5a tile settles it; here one that sizes the payload alone."""
+    reference, _res = _converted_tile()
+    reference = _restate_mcin_sizes(reference, with_header=False)
+    path = tmp_path / "reference.adt"
+    path.write_bytes(reference)
+    assert mcin_size_convention(reference)[0] == MCIN_SIZE_PAYLOAD_ONLY
+
+    out, res = _converted_tile(adt_reference=str(path))
+    assert mcin_size_convention(out)[0] == MCIN_SIZE_PAYLOAD_ONLY
+    assert any(n.code == "adt.mcin.learned" for n in res.notes)
+
+
+def test_a_reference_that_cannot_be_read_warns_and_keeps_the_default(tmp_path):
+    out, res = _converted_tile(adt_reference=str(tmp_path / "nope.adt"))
+    assert mcin_size_convention(out)[0] == MCIN_SIZE_WITH_HEADER
+    note = next(n for n in res.notes if n.code == "adt.mcin.reference_unusable")
+    assert "could not read" in note.message
+
+
+def test_a_modern_tile_is_rejected_as_a_reference():
+    """Cataclysm dropped MCIN, so a split tile cannot answer the question."""
+    root, _tex, _obj = F.build_split_adt(chunks=4)
+    convention, why = mcin_size_convention(root, "modern.adt")
+    assert convention == "" and "no MCIN" in why
+
+
+def test_a_reference_that_disagrees_with_itself_is_refused():
+    reference, _res = _converted_tile()
+    # Flip one entry only, leaving the rest header-inclusive.
+    mixed = _restate_mcin_sizes(reference, with_header=False, only=1)
+    convention, why = mcin_size_convention(mixed, "mixed.adt")
+    assert convention == "" and "inconsistent with itself" in why
+
+
+def _chunk_payload(data: bytes, name: str) -> bytes:
+    for chunk in ChunkReader(data, reverse=True):
+        if chunk.name == name:
+            return chunk.data
+    raise AssertionError(f"no {name} chunk")
+
+
+def _restate_mcin_sizes(data: bytes, *, with_header: bool,
+                        only: int | None = None) -> bytes:
+    """Rewrite MCIN sizes under the other convention, in place."""
+    out = bytearray(data)
+    for chunk in ChunkReader(data, reverse=True):
+        if chunk.name != "MCIN":
+            continue
+        for i in range(len(chunk.data) // MCIN_ENTRY_SIZE):
+            if only is not None and i != only:
+                continue
+            at = chunk.offset + i * MCIN_ENTRY_SIZE
+            offset, _size = struct.unpack_from("<II", out, at)
+            if not offset:
+                continue
+            declared = struct.unpack_from("<I", out, offset + 4)[0]
+            struct.pack_into("<I", out, at + 4,
+                             declared + 8 if with_header else declared)
+    return bytes(out)
