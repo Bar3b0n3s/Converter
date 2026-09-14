@@ -498,3 +498,40 @@ def test_a_wdl_is_recognised_and_converted(tmp_path):
     assert written.exists()
     assert "MLHD" not in [c.name for c in ChunkReader(written.read_bytes(),
                                                       reverse=True)]
+
+
+def _terrain_tree(tmp_path):
+    """A map folder with every piece a modern build writes for one tile."""
+    src = tmp_path / "in"
+    maps = src / "world/maps/az"
+    maps.mkdir(parents=True)
+    root, tex, obj = F.build_split_adt(chunks=4)
+    for name, data in (("Az_1_1.adt", root), ("Az_1_1_tex0.adt", tex),
+                       ("Az_1_1_obj0.adt", obj), ("Az_1_1_tex1.adt", tex),
+                       ("Az_1_1_obj1.adt", obj), ("Az_1_1_lod.adt", root)):
+        (maps / name).write_bytes(data)
+    return src, maps
+
+
+def test_terrain_pieces_the_tile_cannot_hold_are_reported_not_dropped(tmp_path):
+    """They used to be grouped, unused, and never mentioned again."""
+    src, maps = _terrain_tree(tmp_path)
+    jobs, skipped = plan([src])
+
+    merged = sum(len(j.extra) for j in jobs)
+    accounted = len(jobs) + len(skipped) + merged
+    assert accounted == len(list(maps.iterdir())) == 6
+
+    reasons = {Path(s.source).name: s.notes[0].message for s in skipped}
+    assert set(reasons) == {"Az_1_1_tex1.adt", "Az_1_1_obj1.adt",
+                            "Az_1_1_lod.adt"}
+    assert "high-detail texture" in reasons["Az_1_1_tex1.adt"]
+    assert "LOD terrain mesh" in reasons["Az_1_1_lod.adt"]
+    assert all(s.notes[0].code == "adt.piece_unused" for s in skipped)
+
+
+def test_the_tile_itself_is_still_merged_from_its_pieces(tmp_path):
+    src, _maps = _terrain_tree(tmp_path)
+    jobs, _skipped = plan([src])
+    assert len(jobs) == 1
+    assert sorted(jobs[0].extra) == ["obj0", "tex0"]

@@ -136,3 +136,44 @@ def test_the_copy_and_skip_tables_do_not_disagree():
 def test_every_kind_action_names_a_real_kind():
     assert set(detect.KIND_ACTIONS) <= set(detect.EXTENSIONS)
     assert not set(detect.KIND_ACTIONS) & detect.CONVERTIBLE
+
+
+# ---------------------------------------------------------------------------
+# Map sidecars
+# ---------------------------------------------------------------------------
+def chunked(items) -> bytes:
+    import struct
+    return b"".join(name[::-1].encode() + struct.pack("<I", len(payload)) + payload
+                    for name, payload in items)
+
+
+SIDECARS = {
+    "_lgt.wdt": [("MVER", b"\0" * 4), ("MPLT", b"\0" * 32)],
+    "_occ.wdt": [("MVER", b"\0" * 4), ("MAOI", b"\0" * 16)],
+    "_fogs.wdt": [("MVER", b"\0" * 4), ("MVFX", b"\0" * 16)],
+    "_mpv.wdt": [("MVER", b"\0" * 4), ("MPVD", b"\0" * 16)],
+    "_lod.adt": [("MVER", b"\0" * 4), ("MLHD", b"\0" * 16)],
+}
+
+
+@pytest.mark.parametrize("suffix,items", sorted(SIDECARS.items()))
+def test_a_map_sidecar_is_not_mistaken_for_the_map_file(suffix, items):
+    """They share an extension with the tile they sit beside."""
+    path = f"world/maps/azeroth/azeroth{suffix}"
+    assert detect.detect(chunked(items), path) == detect.MAP_SIDECAR
+
+
+@pytest.mark.parametrize("suffix,items", sorted(SIDECARS.items()))
+def test_a_map_sidecar_is_skipped_saying_what_it_held(suffix, items):
+    path = f"world/maps/azeroth/azeroth{suffix}"
+    action, reason = detect.classify(detect.MAP_SIDECAR, path)
+    assert action == detect.SKIP
+    assert "never looks for the file" in reason
+    assert reason != "a map sidecar carrying data added after Wrath; " \
+                     "3.3.5a keeps none of this and never looks for the file"
+
+
+def test_a_real_wdt_is_still_a_wdt():
+    """The sidecar check must not swallow the map index itself."""
+    real = chunked([("MVER", b"\0" * 4), ("MPHD", b"\0" * 32), ("MAIN", b"\0" * 64)])
+    assert detect.detect(real, "azeroth.wdt") == detect.WDT

@@ -214,6 +214,17 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
         extra = {k: v for k, v in parts.items() if k in ("tex0", "obj0")}
         jobs.append(Job(kind=detect.ADT, source=root_path,
                         relpath=os.path.relpath(root_path, anchor), extra=extra))
+        # Pieces the merged tile has no room for still have to be accounted
+        # for, or they would leave the run without ever being mentioned.
+        for part, path in sorted(parts.items()):
+            if part in ("root", "tex0", "obj0"):
+                continue
+            res = FileResult(source=os.path.relpath(path, anchor),
+                             kind=detect.ADT, status=Status.SKIPPED)
+            res.info("adt.piece_unused",
+                     detect.UNUSED_ADT_PIECES.get(
+                         part, f"the _{part} piece has no 3.3.5a equivalent"))
+            skipped.append(res)
 
     return jobs, skipped
 
@@ -326,6 +337,16 @@ def plan_casc(storage, listfile: Listfile, *, include: Sequence[str] = (),
         jobs.append(Job(kind=detect.ADT, relpath=to_posix(path), file_id=file_id,
                         extra_ids={k: v[0] for k, v in pieces.items()
                                    if k in ("tex0", "obj0")}))
+        for part, (piece_id, piece_path) in sorted(pieces.items()):
+            if part in ("root", "tex0", "obj0"):
+                continue
+            res = FileResult(source=piece_path, kind=detect.ADT,
+                             status=Status.SKIPPED)
+            res.info("adt.piece_unused",
+                     detect.UNUSED_ADT_PIECES.get(
+                         part, f"the _{part} piece has no 3.3.5a equivalent"),
+                     file_id=piece_id)
+            skipped.append(res)
     return jobs, skipped
 
 

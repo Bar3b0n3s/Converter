@@ -49,6 +49,7 @@ DDS = "dds"
 PNG = "png"
 BLS = "bls"           # compiled shaders
 TEXT = "text"         # .lua/.xml/.toc/.txt and friends
+MAP_SIDECAR = "map-sidecar"   # _lgt/_occ/_fogs/_mpv .wdt, _lod .adt
 UNKNOWN = "unknown"
 
 # What to do with a file, once its kind is known.
@@ -142,6 +143,33 @@ CONVERTIBLE_EXTENSIONS = {
     ".skel": "a skeleton", ".blp": "a texture", ".wmo": "a world object",
     ".adt": "a terrain tile", ".wdt": "a map index",
     ".wdl": "a low-resolution heightmap", ".dbc": "a client database",
+}
+
+#: Files that sit beside a map's .wdt or .adt carrying data for systems that
+#: arrived after Wrath.  Each is recognised by a chunk only it has, because the
+#: extension it shares with the real map file says nothing about which it is.
+MAP_SIDECAR_CHUNKS = {
+    "MPLT": "per-tile light definitions (_lgt.wdt)",
+    "MPL2": "per-tile light definitions (_lgt.wdt)",
+    "MPL3": "per-tile light definitions (_lgt.wdt)",
+    "MLTA": "light animations (_lgt.wdt)",
+    "MAOI": "terrain occlusion hulls (_occ.wdt)",
+    "MAOH": "terrain occlusion heightmap (_occ.wdt)",
+    "MVFX": "volumetric fog (_fogs.wdt)",
+    "VFOG": "volumetric fog (_fogs.wdt)",
+    "MPVD": "particulate volumes (_mpv.wdt)",
+    "MLHD": "the LOD terrain mesh (_lod.adt)",
+    "MLVH": "the LOD terrain mesh (_lod.adt)",
+    "MLLL": "the LOD terrain mesh (_lod.adt)",
+}
+
+#: Suffixes of the terrain pieces a 3.3.5a tile has no room for, and why.
+UNUSED_ADT_PIECES = {
+    "tex1": "the high-detail texture variant; 3.3.5a's single tile takes its "
+            "layers from _tex0",
+    "obj1": "the high-detail object variant; 3.3.5a's single tile takes its "
+            "placements from _obj0",
+    "lod": "Legion's LOD terrain mesh, for a renderer 3.3.5a does not have",
 }
 
 #: Extensions that name a Cataclysm-and-later split terrain file.
@@ -269,6 +297,11 @@ def detect(data: bytes, path: str = "") -> str:
             return WDT
         if "MAOF" in names:
             return WDL
+        # Last of the map formats, because a real .wdl carries the same LOD
+        # mesh chunks a _lod.adt does -- it just also has the MAOF that makes
+        # it a heightmap, which is what the check above settles.
+        if any(n in MAP_SIDECAR_CHUNKS for n in names):
+            return MAP_SIDECAR
         if names[0] == "MVER" and len(names) == 1:
             # MVER-only files are split ADT pieces whose payload chunks follow.
             return ADT
@@ -309,6 +342,10 @@ def classify(kind: str, path: str = "",
         return CONVERT, ""
     if kind in KIND_ACTIONS:
         return KIND_ACTIONS[kind]
+    if kind == MAP_SIDECAR:
+        return SKIP, ("a map sidecar carrying " + _sidecar_detail(path)
+                      + "; 3.3.5a keeps none of this and never looks for the "
+                      "file")
 
     ext = os.path.splitext(path)[1].lower()
     if ext in UNSUPPORTED_EXTENSIONS:
@@ -326,6 +363,19 @@ def classify(kind: str, path: str = "",
         # than something harmful, so carry it through and say so.
         return COPY, f"unrecognised format {ext}; copied unchanged"
     return SKIP, "unrecognised format with no extension to judge it by"
+
+
+def _sidecar_detail(path: str) -> str:
+    """Name what a sidecar holds, from the suffix when it has one."""
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    for suffix, detail in (("_lgt", "per-tile light definitions"),
+                           ("_occ", "terrain occlusion data"),
+                           ("_fogs", "volumetric fog"),
+                           ("_mpv", "particulate volumes"),
+                           ("_lod", "the LOD terrain mesh")):
+        if stem.endswith(suffix):
+            return detail
+    return "data added after Wrath"
 
 
 def adt_base_name(path: str) -> str:
