@@ -119,11 +119,10 @@ def _collect_anims(model: M2Model, stem: str, source: AssetSource | None,
         out.append(ConvertedAsset(name, data, sub))
 
     if missing:
-        level = result.lossy if opts.drop_external_anims else result.warn
-        level("m2.anim.missing",
-              f"{missing} of {len(model.anim_file_ids)} external .anim file(s) "
-              f"were not found; those sequences will not play",
-              missing=missing, total=len(model.anim_file_ids))
+        result.warn("m2.anim.missing",
+                    f"{missing} of {len(model.anim_file_ids)} external .anim "
+                    f"file(s) were not found; those sequences will not play",
+                    missing=missing, total=len(model.anim_file_ids))
     return out
 
 

@@ -37,8 +37,6 @@ class Options:
     overwrite: bool = False
     dry_run: bool = False
     jobs: int = 1
-    #: Copy inputs that are already 3.3.5a-compatible instead of skipping them.
-    copy_passthrough: bool = True
 
     # -- references -----------------------------------------------------
     unresolved: UnresolvedPolicy = UnresolvedPolicy.PLACEHOLDER
@@ -54,9 +52,8 @@ class Options:
     # -- textures -------------------------------------------------------
     texture_format: TextureFormat = TextureFormat.AUTO
     #: 0 disables the cap.
-    max_texture_size: int = 1024
+    max_texture_size: int = 1024  # BLP_SOFT_MAX_DIMENSION
     force_power_of_two: bool = True
-    regenerate_mips: bool = True
     #: Rebuild BC5 normal maps' Z channel into blue during transcode.
     reconstruct_normal_z: bool = True
     #: Alpha below this becomes fully transparent in DXT1 punch-through blocks.
@@ -69,9 +66,6 @@ class Options:
     strip_ribbons: bool = False
     strip_cameras: bool = False
     strip_lights: bool = False
-    #: Drop animation sequences that live in external .anim files and were not
-    #: supplied alongside the model.
-    drop_external_anims: bool = False
     #: Convert a Legion+ model whose SKID skeleton could not be found. The
     #: result has no bones and no animations, so this is off by default.
     allow_missing_skeleton: bool = False

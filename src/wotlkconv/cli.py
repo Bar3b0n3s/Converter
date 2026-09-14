@@ -20,11 +20,10 @@ from .adt import inspect_adt
 from .blp import inspect_blp
 from .errors import ConverterError
 from .listfile import ENV_VAR, Listfile
-from .limits import TARGET_BUILD, TARGET_PATCH
+from .limits import BLP_SOFT_MAX_DIMENSION, TARGET_BUILD, TARGET_PATCH
 from .m2 import inspect_anim, inspect_m2, inspect_skin
 from .options import Options, TextureFormat, UnresolvedPolicy
 from .pipeline import plan, run
-from .report import Status
 from .wmo import inspect_group, inspect_wmo_root
 
 _INSPECTORS = {
@@ -109,7 +108,8 @@ examples:
                      default=TextureFormat.AUTO.value,
                      help="output encoding (default: %(default)s -- DXT1 when "
                           "opaque, DXT5 when the alpha channel needs gradients)")
-    tex.add_argument("--max-texture-size", type=int, default=1024, metavar="N",
+    tex.add_argument("--max-texture-size", type=int,
+                     default=BLP_SOFT_MAX_DIMENSION, metavar="N",
                      help="downscale textures larger than N pixels; 0 disables "
                           "(default: %(default)s)")
     tex.add_argument("--allow-npot", action="store_true",

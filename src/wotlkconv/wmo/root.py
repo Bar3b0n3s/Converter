@@ -21,23 +21,13 @@ from __future__ import annotations
 import dataclasses
 import struct
 
-from ..binio import Writer
-from ..chunks import Chunk, ChunkReader, ChunkWriter
+from ..chunks import Chunk, ChunkReader
 from ..errors import MalformedFileError, UnsupportedFormatError
 from ..limits import (
-    MODD_SIZE,
     MOHD_SIZE,
-    MOMT_SIZE,
-    WMO_HEADER_FLAG_MASK,
-    WMO_MATERIAL_FLAG_MASK,
-    WMO_MAX_BLEND_MODE,
-    WMO_MAX_SHADER,
     WMO_ROOT_CHUNKS_KNOWN,
     WMO_VERSION,
 )
-from ..listfile import Listfile
-from ..options import Options
-from ..report import FileResult
 
 #: Chunks the 3.3.5a root parser reads, in the order Blizzard emitted them.
 ROOT_CHUNK_ORDER = (

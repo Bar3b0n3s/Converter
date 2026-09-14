@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import dataclasses
 import struct
-from typing import Sequence
 
 from ..binio import Writer
 from ..errors import MalformedFileError, UnsupportedFormatError
@@ -30,6 +29,10 @@ from ..report import FileResult, Status
 SUBMESH_SIZE = 48
 BATCH_SIZE = 24
 SHADOW_BATCH_SIZE = 12
+
+#: Byte offsets inside M2Batch.
+BATCH_SHADER_ID = 0x02
+BATCH_TEXTURE_COUNT = 0x0E
 
 #: M2Batch.shader_id bit meaning "index into the model's texture combiner combos".
 SHADER_COMBINER_FLAG = 0x8000
@@ -167,22 +170,22 @@ def _clamp_batches(skin: Skin, uses_combiner_combos: bool,
     out: list[bytes] = []
     for raw in skin.batches:
         b = bytearray(raw)
-        shader_id = struct.unpack_from("<H", b, 2)[0]
-        texture_count = struct.unpack_from("<H", b, 0x10)[0]
+        shader_id = struct.unpack_from("<H", b, BATCH_SHADER_ID)[0]
+        texture_count = struct.unpack_from("<H", b, BATCH_TEXTURE_COUNT)[0]
 
         if texture_count > M2_MAX_TEXTURE_UNITS:
             too_many_textures += 1
-            struct.pack_into("<H", b, 0x10, M2_MAX_TEXTURE_UNITS)
+            struct.pack_into("<H", b, BATCH_TEXTURE_COUNT, M2_MAX_TEXTURE_UNITS)
 
         if shader_id & SHADER_COMBINER_FLAG:
             if not uses_combiner_combos:
                 # The batch points into a combiner table the model does not
                 # carry; 3.3.5a would index off the end of the header.
                 bad_shader += 1
-                struct.pack_into("<H", b, 2, 0)
+                struct.pack_into("<H", b, BATCH_SHADER_ID, 0)
         elif shader_id > 0xFF:
             bad_shader += 1
-            struct.pack_into("<H", b, 2, 0)
+            struct.pack_into("<H", b, BATCH_SHADER_ID, 0)
         out.append(bytes(b))
     skin.batches = out
 

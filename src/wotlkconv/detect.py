@@ -8,7 +8,6 @@ therefore always looks at the bytes.
 from __future__ import annotations
 
 import os
-import struct
 
 from .chunks import ChunkReader
 

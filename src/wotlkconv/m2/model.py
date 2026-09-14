@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import struct
-from typing import Any, Sequence
+from typing import Sequence
 
 from ..chunks import Chunk, ChunkReader
 from ..errors import MalformedFileError, UnsupportedFormatError

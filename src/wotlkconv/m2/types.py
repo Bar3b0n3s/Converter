@@ -23,7 +23,7 @@ import dataclasses
 import struct
 from typing import Any, Iterable, Sequence
 
-from ..binio import Reader, Writer
+from ..binio import Writer
 
 # ---------------------------------------------------------------------------
 # Primitive value kinds that can appear inside an M2Array / M2Track

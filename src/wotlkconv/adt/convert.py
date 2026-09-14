@@ -327,7 +327,6 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
 
     mhdr_source = _payload(root_named, "MHDR")
     mhdr = bytearray(mhdr_source[:MHDR_SIZE].ljust(MHDR_SIZE, b"\0"))
-    mhdr_header_pos = len(out)
     out += b"RDHM" if reverse else b"MHDR"
     out += struct.pack("<I", MHDR_SIZE)
     mhdr_data_pos = len(out)
