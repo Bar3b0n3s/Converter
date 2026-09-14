@@ -241,3 +241,207 @@ def test_cli_rejects_an_empty_input_set(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     assert main(["convert", str(empty), "-o", str(tmp_path / "o")]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Convert / copy / skip classification
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def mixed_tree(tmp_path: Path) -> Path:
+    src = tmp_path / "mixed"
+    src.mkdir()
+    (src / "art.blp").write_bytes(
+        F.build_blp(F.build_gradient_image(16, 16), PreferredFormat.DXT1))
+    (src / "sound.wav").write_bytes(b"RIFF\0\0\0\0WAVEfmt ")
+    (src / "ui.lua").write_bytes(b"-- script\n")
+    (src / "db.db2").write_bytes(b"WDC5" + b"\0" * 40)
+    (src / "hd.tex").write_bytes(b"\0" * 40)
+    (src / "rig.skel").write_bytes(F.build_skel(bones=1, sequences=1))
+    return src
+
+
+def test_formats_the_client_reads_unchanged_are_copied(mixed_tree, tmp_path):
+    jobs, _skipped = plan([mixed_tree])
+    actions = {j.source.name: j.action for j in jobs}
+    assert actions == {"art.blp": detect.CONVERT,
+                       "sound.wav": detect.COPY,
+                       "ui.lua": detect.COPY}
+
+
+def test_copied_files_arrive_byte_for_byte(mixed_tree, tmp_path):
+    out = tmp_path / "out"
+    jobs, skipped = plan([mixed_tree])
+    run(jobs, Options(), Listfile(), out, skipped=skipped)
+    assert (out / "sound.wav").read_bytes() == (mixed_tree / "sound.wav").read_bytes()
+    assert (out / "ui.lua").read_bytes() == (mixed_tree / "ui.lua").read_bytes()
+
+
+def test_unusable_formats_are_skipped_with_a_specific_reason(mixed_tree):
+    _jobs, skipped = plan([mixed_tree])
+    reasons = {Path(s.source).name: s.notes[0].message for s in skipped}
+    assert ".dbc" in reasons["db.db2"]
+    assert "high-resolution" in reasons["hd.tex"]
+    assert "merged into the model" in reasons["rig.skel"]
+
+
+def test_copying_can_be_turned_off(mixed_tree):
+    jobs, skipped = plan([mixed_tree], copy_unconverted=False)
+    assert {j.source.name for j in jobs} == {"art.blp"}
+    assert any("--no-copy-unconverted" in s.notes[0].message for s in skipped)
+
+
+# ---------------------------------------------------------------------------
+# Converting straight out of a CASC install
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def casc_install(tmp_path: Path):
+    import casc_fixtures as CF
+    root, tex, obj = F.build_split_adt(chunks=2)
+    files = {
+        123456: F.serialise_modern_m2(F.build_modern_model(), skeleton_id=940000),
+        910000: F.build_skin(legion=True), 910001: F.build_skin(legion=True),
+        910002: F.build_skin(legion=True), 910003: F.build_skin(legion=True),
+        920000: F.build_anim(), 920001: F.build_anim(),
+        940000: F.build_skel(bones=4, sequences=2),
+        900000: F.build_blp(F.build_gradient_image(16, 16), PreferredFormat.DXT5),
+        900001: F.build_bc5_blp(16, 16),
+        830000: F.build_modern_wmo_root(),
+        830001: F.build_modern_wmo_group(), 830002: F.build_modern_wmo_group(),
+        700100: root, 700101: tex, 700102: obj,
+        600001: b"RIFF\0\0\0\0WAVEfmt ",
+        600003: b"WDC5" + b"\0" * 40,
+    }
+    CF.build_install(tmp_path / "wow", files)
+    entries = [
+        "123456;creature/testbeast/testbeast.m2",
+        "910000;creature/testbeast/testbeast00.skin",
+        "910001;creature/testbeast/testbeast01.skin",
+        "910002;creature/testbeast/testbeast02.skin",
+        "910003;creature/testbeast/testbeast03.skin",
+        "920000;creature/testbeast/testbeast0000-00.anim",
+        "920001;creature/testbeast/testbeast0001-00.anim",
+        "940000;creature/testbeast/testbeast.skel",
+        "900000;creature/testbeast/testbeast_skin.blp",
+        "900001;creature/testbeast/testbeast_normal.blp",
+        "830000;world/wmo/house/house.wmo",
+        "830001;world/wmo/house/house_000.wmo",
+        "830002;world/wmo/house/house_001.wmo",
+        "700100;world/maps/azeroth/azeroth_32_48.adt",
+        "700101;world/maps/azeroth/azeroth_32_48_tex0.adt",
+        "700102;world/maps/azeroth/azeroth_32_48_obj0.adt",
+        "600001;sound/creature/bear/attack.wav",
+        "600003;dbfilesclient/creaturedisplayinfo.db2",
+    ] + LISTFILE_ENTRIES
+    (tmp_path / "listfile.csv").write_text("\n".join(entries) + "\n")
+    return tmp_path / "wow", tmp_path / "listfile.csv"
+
+
+def test_casc_selection_groups_and_claims_like_the_disk_planner(casc_install):
+    from wotlkconv.casc import CascStorage
+    from wotlkconv.pipeline import plan_casc
+    install, listfile_path = casc_install
+    listfile = Listfile.load(listfile_path)
+    with CascStorage.open(install) as storage:
+        jobs, skipped = plan_casc(storage, listfile, include=["**"])
+        # Skins, anims and WMO groups are claimed by the model and root that
+        # pull them in, so they are not planned separately; the .wav is
+        # classified as a copy and keeps its "unknown" kind.
+        assert sorted(j.kind for j in jobs) == [
+            detect.ADT, detect.BLP, detect.BLP, detect.M2,
+            detect.UNKNOWN, detect.WMO_ROOT]
+        assert [j.action for j in jobs if j.kind == detect.UNKNOWN] == [detect.COPY]
+        # The tile's three pieces became one job.
+        adt = next(j for j in jobs if j.kind == detect.ADT)
+        assert sorted(adt.extra_ids) == ["obj0", "tex0"]
+        assert any(".dbc" in s.notes[0].message for s in skipped)
+
+
+def test_casc_convert_produces_the_client_layout(casc_install, tmp_path):
+    from wotlkconv.casc import CascStorage
+    from wotlkconv.pipeline import plan_casc
+    install, listfile_path = casc_install
+    listfile = Listfile.load(listfile_path)
+    out = tmp_path / "out"
+    with CascStorage.open(install) as storage:
+        jobs, skipped = plan_casc(storage, listfile, include=["**"])
+        report = run(jobs, Options(), listfile, out, skipped=skipped,
+                     storage=storage)
+    files = sorted(p.relative_to(out).as_posix() for p in out.rglob("*")
+                   if p.is_file())
+    assert files == [
+        "creature/testbeast/testbeast.m2",
+        "creature/testbeast/testbeast00.skin",
+        "creature/testbeast/testbeast0000-00.anim",
+        "creature/testbeast/testbeast0001-00.anim",
+        "creature/testbeast/testbeast01.skin",
+        "creature/testbeast/testbeast02.skin",
+        "creature/testbeast/testbeast03.skin",
+        "creature/testbeast/testbeast_normal.blp",
+        "creature/testbeast/testbeast_skin.blp",
+        "sound/creature/bear/attack.wav",
+        "world/maps/azeroth/azeroth_32_48.adt",
+        "world/wmo/house/house.wmo",
+        "world/wmo/house/house_000.wmo",
+        "world/wmo/house/house_001.wmo",
+    ]
+    assert not report.failed
+
+
+def test_casc_convert_merges_the_split_tile(casc_install, tmp_path):
+    from wotlkconv.adt import inspect_adt
+    from wotlkconv.casc import CascStorage
+    from wotlkconv.pipeline import plan_casc
+    install, listfile_path = casc_install
+    listfile = Listfile.load(listfile_path)
+    out = tmp_path / "out"
+    with CascStorage.open(install) as storage:
+        jobs, skipped = plan_casc(storage, listfile, include=["world/maps/**"])
+        run(jobs, Options(), listfile, out, skipped=skipped, storage=storage)
+    info = inspect_adt(
+        (out / "world/maps/azeroth/azeroth_32_48.adt").read_bytes(), "a")
+    assert info["wotlk_compatible"] and info["map_chunks"] == 2
+
+
+def test_casc_selection_by_file_id_needs_no_listfile(casc_install, tmp_path):
+    from wotlkconv.casc import CascStorage
+    from wotlkconv.pipeline import plan_casc
+    install, _listfile_path = casc_install
+    with CascStorage.open(install) as storage:
+        jobs, _skipped = plan_casc(storage, Listfile(), file_ids=[900000])
+    assert len(jobs) == 1
+    assert jobs[0].file_id == 900000
+    assert jobs[0].relpath.startswith("unknown/")
+
+
+def test_cli_convert_from_casc(casc_install, tmp_path):
+    install, listfile_path = casc_install
+    out = tmp_path / "cli-out"
+    code = main(["convert", "--casc", str(install), "-l", str(listfile_path),
+                 "--include", "creature/**", "-o", str(out)])
+    assert code == 0
+    assert (out / "creature/testbeast/testbeast.m2").is_file()
+    assert (out / "creature/testbeast/testbeast00.skin").is_file()
+
+
+def test_cli_casc_selection_is_required(casc_install, tmp_path):
+    install, listfile_path = casc_install
+    assert main(["convert", "--casc", str(install), "-l", str(listfile_path),
+                 "-o", str(tmp_path / "o")]) == 1
+
+
+def test_cli_casc_info(casc_install, capsys):
+    install, _ = casc_install
+    assert main(["casc", "info", "--casc", str(install)]) == 0
+    assert "product    wow" in capsys.readouterr().out
+
+
+def test_cli_casc_extract_is_raw(casc_install, tmp_path, capsys):
+    install, listfile_path = casc_install
+    out = tmp_path / "raw"
+    assert main(["casc", "extract", "--casc", str(install),
+                 "-l", str(listfile_path), "--include", "creature/**/*.m2",
+                 "-o", str(out)]) == 0
+    extracted = out / "creature/testbeast/testbeast.m2"
+    assert extracted.is_file()
+    # extract does not convert: the file is still the chunked original
+    assert extracted.read_bytes()[:4] == b"MD21"

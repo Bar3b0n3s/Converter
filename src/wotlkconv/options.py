@@ -48,6 +48,9 @@ class Options:
     #: Write every output into the destination root instead of mirroring the
     #: input's directory structure.
     flatten: bool = False
+    #: Copy formats 3.3.5a reads unchanged (sound, interface, fonts) into the
+    #: output rather than dropping them. A patch archive needs them too.
+    copy_unconverted: bool = True
 
     # -- textures -------------------------------------------------------
     texture_format: TextureFormat = TextureFormat.AUTO

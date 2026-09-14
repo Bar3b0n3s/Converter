@@ -665,3 +665,31 @@ def build_split_adt(*, chunks: int = 4, layers: int = 2,
         obj.add("MCNK", inner.getvalue())
 
     return root.getvalue(), tex.getvalue(), obj.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# WDT
+# ---------------------------------------------------------------------------
+def build_modern_wdt(*, tiles=((32, 48), (33, 48)), flags: int = 0x0201,
+                     global_wmo: bool = False, with_maid: bool = True) -> bytes:
+    """A BfA-shaped map index: MAID present, big-alpha flag absent."""
+    cw = ChunkWriter(reverse=WMO_CHUNKS_REVERSED)
+    cw.add("MVER", struct.pack("<I", 18))
+
+    mphd = bytearray(32)
+    struct.pack_into("<I", mphd, 0, flags | (1 if global_wmo else 0))
+    struct.pack_into("<I", mphd, 4, 123456)   # Cata+ map texture FileDataID
+    cw.add("MPHD", bytes(mphd))
+
+    main = bytearray(64 * 64 * 8)
+    for x, y in tiles:
+        struct.pack_into("<I", main, (y * 64 + x) * 8, 1)
+    cw.add("MAIN", bytes(main))
+
+    if with_maid:
+        cw.add("MAID", bytes(64 * 64 * 8 * 4))
+    cw.add("MWMO", b"world\\wmo\\global.wmo\0" if global_wmo else b"")
+    if global_wmo:
+        cw.add("MODF", bytes(64))
+    cw.add("MPL2", bytes(24))
+    return cw.getvalue()

@@ -22,6 +22,42 @@ ADT = "adt"
 WDT = "wdt"
 UNKNOWN = "unknown"
 
+# What to do with a file, once its kind is known.
+CONVERT = "convert"   # needs a structural downgrade
+COPY = "copy"         # 3.3.5a reads it unchanged; copy it into the patch
+SKIP = "skip"         # cannot be used by 3.3.5a, or is handled elsewhere
+
+#: Kinds this tool converts.
+CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT}
+
+#: Extensions the 3.3.5a client reads as-is. A patch archive needs these just
+#: as much as the converted files, so they are copied rather than dropped.
+COPY_EXTENSIONS = {
+    ".wav", ".mp3", ".ogg",                    # sound and music
+    ".avi",                                    # cinematics
+    ".lua", ".xml", ".toc", ".txt", ".html",   # interface
+    ".ttf", ".otf",                            # fonts
+    ".zmp",                                    # minimap block data
+    ".sbt", ".wtf", ".ini",
+}
+
+#: Extensions that exist in modern builds but cannot be used by 3.3.5a, with
+#: the reason, so the report says why rather than "unrecognised".
+UNSUPPORTED_EXTENSIONS = {
+    ".db2": "client databases; 3.3.5a reads .dbc, and converting between them "
+            "needs per-table schemas this tool does not carry",
+    ".tex": "Legion streamed high-resolution texture payloads; 3.3.5a loads "
+            "whole BLPs instead",
+    ".phys": "physics rigs; 3.3.5a has no model physics",
+    ".bone": "Legion bone override files; no 3.3.5a equivalent",
+    ".mp4": "3.3.5a plays .avi cinematics, not .mp4",
+    ".wwise": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
+    ".bnk": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
+    ".wdl": "low-resolution terrain heightmaps; the 3.3.5a layout differs and "
+            "this tool does not convert them yet",
+    ".anim.skel": "unused",
+}
+
 #: Output extension for each kind.
 EXTENSIONS = {
     M2: ".m2", SKIN: ".skin", ANIM: ".anim", SKEL: ".skel", BLP: ".blp",
@@ -85,6 +121,32 @@ def detect(data: bytes, path: str = "") -> str:
     if ext == ".skel":
         return SKEL
     return UNKNOWN
+
+
+def classify(kind: str, path: str = "") -> tuple[str, str]:
+    """Decide what to do with a file, returning ``(action, reason)``.
+
+    Kinds this tool understands are converted. Everything else is judged on its
+    extension: formats 3.3.5a reads unchanged are copied through so a patch
+    build is complete, and formats it cannot use are skipped with a reason
+    that says which.
+    """
+    if kind == SKEL:
+        return SKIP, ("skeletons are merged into the model that references "
+                      "them, not converted on their own")
+    if kind in CONVERTIBLE:
+        return CONVERT, ""
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in UNSUPPORTED_EXTENSIONS:
+        return SKIP, UNSUPPORTED_EXTENSIONS[ext]
+    if ext in COPY_EXTENSIONS:
+        return COPY, ""
+    if kind == UNKNOWN and ext:
+        # An unrecognised extension is more likely to be data 3.3.5a can read
+        # than something harmful, so carry it through and say so.
+        return COPY, f"unrecognised format {ext}; copied unchanged"
+    return SKIP, "unrecognised format with no extension to judge it by"
 
 
 def is_split_adt(path: str) -> bool:

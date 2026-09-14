@@ -381,6 +381,11 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
                               if n not in ("MDID",)),
                   chunks=modern)
     if split_source:
+        res.warn("adt.big_alpha",
+                 "this tile's MCAL alpha maps are the 8-bit Cataclysm form; the "
+                 "map's .wdt must have the big-alpha flag (MPHD 0x4) set or "
+                 "3.3.5a reads them as 4-bit and every terrain blend is wrong. "
+                 "Converting the .wdt in the same run sets it for you")
         res.info("adt.merged",
                  f"merged {'root' if parts.root else ''}"
                  f"{'+tex0' if parts.tex0 else ''}"

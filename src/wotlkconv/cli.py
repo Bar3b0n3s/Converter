@@ -5,6 +5,7 @@
                                      can load it
     wotlkconv plan IN...             list what a convert run would do
     wotlkconv listfile PATH          sanity-check a community listfile
+    wotlkconv casc info|list|extract read a game install directly
 """
 
 from __future__ import annotations
@@ -16,14 +17,15 @@ import sys
 from pathlib import Path
 
 from . import __version__, detect, log
-from .adt import inspect_adt
+from .adt import inspect_adt, inspect_wdt
 from .blp import inspect_blp
+from .casc import CascStorage, KeyRing
 from .errors import ConverterError
-from .listfile import ENV_VAR, Listfile
+from .listfile import ENV_VAR, Listfile, to_posix
 from .limits import BLP_SOFT_MAX_DIMENSION, TARGET_BUILD, TARGET_PATCH
 from .m2 import inspect_anim, inspect_m2, inspect_skin
 from .options import Options, TextureFormat, UnresolvedPolicy
-from .pipeline import plan, run
+from .pipeline import normalise_pattern, plan, plan_casc, run
 from .wmo import inspect_group, inspect_wmo_root
 
 _INSPECTORS = {
@@ -34,6 +36,7 @@ _INSPECTORS = {
     detect.WMO_ROOT: inspect_wmo_root,
     detect.WMO_GROUP: inspect_group,
     detect.ADT: inspect_adt,
+    detect.WDT: inspect_wdt,
 }
 
 
@@ -71,13 +74,29 @@ examples:
     common.add_argument("--no-color", action="store_true",
                         help="disable coloured output")
 
+    casc_opts = argparse.ArgumentParser(add_help=False)
+    cg = casc_opts.add_argument_group("game install (CASC)")
+    cg.add_argument("--casc", metavar="DIR",
+                    help="read straight out of a game install: the folder "
+                         "containing the game executable and Data/")
+    cg.add_argument("--casc-product", metavar="NAME",
+                    help="which product in .build.info to read (wow, "
+                         "wow_classic, wowt, ...); default is the active one")
+    cg.add_argument("--casc-locale", default="enus", metavar="LOCALE",
+                    help="locale to prefer for localised files "
+                         "(default: %(default)s)")
+    cg.add_argument("--casc-keys", metavar="PATH",
+                    help="TACT encryption keys (a WoW.txt of "
+                         "'<keyname> <key>' lines) for encrypted files")
+
     sub = parser.add_subparsers(dest="command", required=True)
 
     # -- convert --------------------------------------------------------
-    conv = sub.add_parser("convert", parents=[common],
+    conv = sub.add_parser("convert", parents=[common, casc_opts],
                           help="downgrade assets for 3.3.5a")
-    conv.add_argument("inputs", nargs="+", metavar="IN",
-                      help="files or directories to convert")
+    conv.add_argument("inputs", nargs="*", metavar="IN",
+                      help="files or directories to convert; omit when reading "
+                           "from --casc")
     conv.add_argument("-o", "--out", required=True, metavar="DIR",
                       help="destination directory")
     conv.add_argument("--no-recursive", action="store_true",
@@ -102,6 +121,17 @@ examples:
                            "outputs to their listfile path")
     refs.add_argument("--flatten", action="store_true",
                       help="write every output into the destination root")
+
+    sel = conv.add_argument_group("selection (with --casc)")
+    sel.add_argument("--include", action="append", default=[], metavar="GLOB",
+                     help=r"in-game path glob to extract, e.g. "
+                          r"'creature/bear/**' or '**/*.m2'; repeatable")
+    sel.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                     help="in-game path glob to leave out; repeatable")
+    sel.add_argument("--include-from", metavar="PATH",
+                     help="file of globs, one per line (# comments allowed)")
+    sel.add_argument("--fileid", action="append", default=[], type=int,
+                     metavar="ID", help="extract one FileDataID; repeatable")
 
     tex = conv.add_argument_group("textures")
     tex.add_argument("--texture-format", choices=[f.value for f in TextureFormat],
@@ -137,6 +167,9 @@ examples:
                      help="treat exceeding a 3.3.5a soft limit as an error")
     mdl.add_argument("--no-merge-adt", action="store_true",
                      help="do not merge split terrain tiles")
+    mdl.add_argument("--no-copy-unconverted", action="store_true",
+                     help="drop formats 3.3.5a reads unchanged (sound, "
+                          "interface, fonts) instead of copying them through")
 
     outg = conv.add_argument_group("output")
     outg.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
@@ -159,6 +192,26 @@ examples:
                         help="list the work a convert run would do")
     pl.add_argument("inputs", nargs="+", metavar="IN")
     pl.add_argument("--no-recursive", action="store_true")
+
+    # -- casc -----------------------------------------------------------
+    casc = sub.add_parser("casc", parents=[common, casc_opts],
+                          help="inspect or extract from a game install")
+    casc_sub = casc.add_subparsers(dest="casc_command", required=True)
+    casc_sub.add_parser("info", parents=[common, casc_opts],
+                        help="show what build the install holds")
+    cl = casc_sub.add_parser("list", parents=[common, casc_opts],
+                             help="list files matching a path glob")
+    cl.add_argument("--include", action="append", default=[], metavar="GLOB")
+    cl.add_argument("-l", "--listfile", metavar="PATH")
+    cl.add_argument("--limit", type=int, default=100, metavar="N")
+    ce = casc_sub.add_parser("extract", parents=[common, casc_opts],
+                             help="extract files without converting them")
+    ce.add_argument("-o", "--out", required=True, metavar="DIR")
+    ce.add_argument("--include", action="append", default=[], metavar="GLOB")
+    ce.add_argument("--fileid", action="append", default=[], type=int,
+                    metavar="ID")
+    ce.add_argument("-l", "--listfile", metavar="PATH")
+    ce.add_argument("-f", "--overwrite", action="store_true")
 
     # -- listfile -------------------------------------------------------
     lf = sub.add_parser("listfile", parents=[common],
@@ -202,12 +255,41 @@ def _options_from(args: argparse.Namespace) -> Options:
         allow_missing_skeleton=args.allow_missing_skeleton,
         convert_companions=not args.no_companions,
         merge_split_adt=not args.no_merge_adt,
+        copy_unconverted=not args.no_copy_unconverted,
     )
 
 
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
+def _read_globs(path: str | None) -> list[str]:
+    if not path:
+        return []
+    out = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            out.append(line)
+    return out
+
+
+def _open_casc(args: argparse.Namespace, search_dirs) -> tuple[object, dict]:
+    """Open the install named by --casc and describe it for worker processes."""
+    keys = KeyRing.discover(getattr(args, "casc_keys", None),
+                            [Path(args.casc), *search_dirs])
+    storage = CascStorage.open(args.casc,
+                               product=getattr(args, "casc_product", None),
+                               locale=getattr(args, "casc_locale", "enus"),
+                               keys=keys)
+    casc_args = {
+        "path": str(args.casc),
+        "product": getattr(args, "casc_product", None),
+        "locale": getattr(args, "casc_locale", "enus"),
+        "keys": keys.sources[0] if keys.sources else None,
+    }
+    return storage, casc_args
+
+
 def cmd_convert(args: argparse.Namespace) -> int:
     opts = _options_from(args)
     search_dirs = [Path(d) for d in args.search_dir]
@@ -217,11 +299,46 @@ def cmd_convert(args: argparse.Namespace) -> int:
                  "models by FileDataID, and without one those references "
                  "cannot be turned back into paths (see --listfile)")
 
-    jobs, skipped = plan(args.inputs, recursive=not args.no_recursive,
-                         claim_companions=not args.no_companions)
+    if not args.inputs and not args.casc:
+        log.error("nothing to convert: give input paths, or --casc to read a "
+                  "game install directly")
+        return 1
+
+    jobs = []
+    skipped = []
+    storage = None
+    casc_args = None
+
+    if args.casc:
+        includes = list(args.include) + _read_globs(args.include_from)
+        if not includes and not args.fileid:
+            log.error("--casc needs a selection: --include with an in-game path "
+                      "glob, --include-from with a file of them, or --fileid. "
+                      "Use --include '**' to take the whole build, but expect "
+                      "millions of files")
+            return 1
+        if includes and not listfile:
+            log.error("--include matches against in-game paths, which need a "
+                      "listfile; pass --listfile, or select by --fileid instead")
+            return 1
+        storage, casc_args = _open_casc(args, search_dirs)
+        cjobs, cskipped = plan_casc(
+            storage, listfile, include=includes, file_ids=args.fileid,
+            exclude=args.exclude, claim_companions=not args.no_companions,
+            copy_unconverted=not args.no_copy_unconverted)
+        jobs += cjobs
+        skipped += cskipped
+
+    if args.inputs:
+        fjobs, fskipped = plan(args.inputs, recursive=not args.no_recursive,
+                               claim_companions=not args.no_companions,
+                               copy_unconverted=not args.no_copy_unconverted)
+        jobs += fjobs
+        skipped += fskipped
+
     if not jobs:
         log.error("nothing to convert")
-        for res in skipped:
+        for res in skipped[:20]:
             log.info(f"  skipped {res.source}: "
                      f"{res.notes[0].message if res.notes else 'unknown reason'}")
         return 1
@@ -232,7 +349,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
     report = run(jobs, opts, listfile, args.out, roots=roots,
                  listfile_path=listfile.source if listfile else None,
-                 skipped=skipped)
+                 skipped=skipped, storage=storage, casc_args=casc_args)
+    if storage is not None:
+        storage.close()
 
     for line in report.summary_lines(verbose=args.verbose >= 1):
         print(line)
@@ -300,6 +419,84 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_casc(args: argparse.Namespace) -> int:
+    import fnmatch
+
+    search_dirs = [Path(args.casc)]
+    storage, _ = _open_casc(args, search_dirs)
+    try:
+        if args.casc_command == "info":
+            stats = storage.stats()
+            print(f"install    {args.casc}")
+            print(f"product    {stats.product}")
+            print(f"version    {stats.version}")
+            print(f"build      {stats.build}")
+            print(f"locale     {stats.locale}")
+            print(f"files      {stats.files}")
+            print(f"encoding   {stats.encoding_entries} content keys")
+            print(f"indices    {stats.index_buckets} bucket(s), "
+                  f"{storage.index.total_entries()} entries")
+            print(f"keys       {stats.keys} encryption key(s) loaded")
+            return 0
+
+        listfile = Listfile.discover(getattr(args, "listfile", None), search_dirs)
+        patterns = [normalise_pattern(p) for p in (args.include or ["**"])]
+
+        if args.casc_command == "list":
+            if not listfile:
+                log.error("listing by path needs a listfile (--listfile)")
+                return 1
+            shown = 0
+            for file_id in sorted(storage.file_ids()):
+                path = listfile.path_for(file_id)
+                if path is None or not any(fnmatch.fnmatch(path, p)
+                                           for p in patterns):
+                    continue
+                print(f"{file_id:>9}  {path}")
+                shown += 1
+                if shown >= args.limit:
+                    print(f"... stopping at --limit {args.limit}")
+                    break
+            if not shown:
+                print("no files matched")
+            return 0
+
+        # extract
+        out_dir = Path(args.out)
+        selected: dict[int, str] = {fid: listfile.path_for(fid) or
+                                    f"unknown/{fid}.bin" for fid in args.fileid}
+        if args.include:
+            if not listfile:
+                log.error("selecting by path needs a listfile (--listfile)")
+                return 1
+            for file_id in storage.file_ids():
+                path = listfile.path_for(file_id)
+                if path and any(fnmatch.fnmatch(path, p) for p in patterns):
+                    selected[file_id] = path
+        if not selected:
+            log.error("nothing selected: pass --include or --fileid")
+            return 1
+
+        written = failed = 0
+        for file_id, path in sorted(selected.items(), key=lambda kv: kv[1]):
+            data, why = storage.try_read_file_id(file_id)
+            if data is None:
+                log.warn(f"{path}: {why}")
+                failed += 1
+                continue
+            target = out_dir / to_posix(path)
+            if target.exists() and not args.overwrite:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            written += 1
+        print(f"extracted {written} file(s) to {out_dir}"
+              + (f", {failed} unavailable" if failed else ""))
+        return 1 if failed and not written else 0
+    finally:
+        storage.close()
+
+
 def cmd_listfile(args: argparse.Namespace) -> int:
     listfile = Listfile.load(args.path)
     print(f"{len(listfile)} entries from {listfile.source}")
@@ -329,6 +526,7 @@ def main(argv: list[str] | None = None) -> int:
         "inspect": cmd_inspect,
         "plan": cmd_plan,
         "listfile": cmd_listfile,
+        "casc": cmd_casc,
     }
     try:
         return handlers[args.command](args)

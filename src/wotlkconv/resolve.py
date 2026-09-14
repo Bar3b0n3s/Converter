@@ -10,7 +10,10 @@ extracted them, and the three layouts in common use are:
   archive tree
 * **flat** -- everything in one directory, basenames only
 
-:class:`AssetSource` tries all three so the caller never has to care.
+:class:`AssetSource` tries all three so the caller never has to care, and can
+fall back to an open CASC install when the companion was never extracted at
+all -- which is the normal case when converting straight out of a game
+install.
 """
 
 from __future__ import annotations
@@ -28,11 +31,12 @@ class AssetSource:
 
     def __init__(self, listfile: Listfile | None = None,
                  roots: Sequence[str | os.PathLike[str]] = (),
-                 extensions: Sequence[str] = ()):
+                 extensions: Sequence[str] = (), casc=None):
         self.listfile = listfile or Listfile()
         self.roots: list[Path] = [Path(r) for r in roots]
         self.extensions = list(extensions) or [".m2", ".skel", ".skin", ".anim",
                                                ".blp", ".bone", ".wmo"]
+        self.casc = casc
         self._cache: dict[str, bytes | None] = {}
         self._index: dict[str, Path] | None = None
 
@@ -112,6 +116,13 @@ class AssetSource:
             path = self.listfile.path_for(file_id)
             if path:
                 result = self.by_path(path)
+
+        if result is None and self.casc is not None:
+            # Files on disk win, so a user's edited copy overrides the install.
+            data, why = self.casc.try_read_file_id(file_id)
+            if data is None:
+                log.debug(f"CASC lookup for {file_id} failed: {why}")
+            result = data
 
         self._cache[key] = result
         return result

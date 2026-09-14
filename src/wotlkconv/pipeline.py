@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import detect, log
-from .adt import AdtParts, convert_adt
+from .adt import AdtParts, convert_adt, convert_wdt
 from .blp import convert_blp
 from .errors import ConverterError
 from .listfile import Listfile, to_posix
@@ -31,23 +31,29 @@ from .report import FileResult, Report, Status
 from .resolve import AssetSource
 from .wmo import convert_group, convert_wmo_root
 
-#: Extensions worth opening when walking a directory.
-INPUT_EXTENSIONS = {".m2", ".skin", ".anim", ".skel", ".blp", ".wmo", ".adt",
-                    ".wdt", ".unknown", ""}
+#: Directory walking opens everything: a patch build needs the sound and
+#: interface files as much as the converted art, and files extracted by
+#: FileDataID have no meaningful extension to filter on.
 
 
 @dataclasses.dataclass(slots=True)
 class Job:
-    """One unit of conversion work."""
+    """One unit of work: a file to convert, or one to copy through."""
 
     kind: str
-    source: Path
     relpath: str
+    source: Path | None = None
+    #: Set instead of ``source`` when the bytes come out of a CASC install.
+    file_id: int | None = None
+    action: str = detect.CONVERT
+    #: Extra inputs for a split terrain tile, by piece name ("tex0", "obj0").
     extra: dict[str, Path] = dataclasses.field(default_factory=dict)
+    extra_ids: dict[str, int] = dataclasses.field(default_factory=dict)
 
     def describe(self) -> str:
-        if self.extra:
-            return f"{self.relpath} (+{', '.join(sorted(self.extra))})"
+        pieces = sorted({*self.extra, *self.extra_ids})
+        if pieces:
+            return f"{self.relpath} (+{', '.join(pieces)})"
         return self.relpath
 
 
@@ -73,9 +79,7 @@ def iter_input_files(inputs: Sequence[str | os.PathLike[str]],
             for dirpath, _dirs, files in walker:
                 for fn in sorted(files):
                     fp = Path(dirpath) / fn
-                    if not fp.is_file():
-                        continue
-                    if fp.suffix.lower() in INPUT_EXTENSIONS or fp.stem.isdigit():
+                    if fp.is_file():
                         out.append((p, fp))
         else:
             log.warn(f"input not found, skipping: {p}")
@@ -122,7 +126,8 @@ def _companion_names(kind: str, path: Path) -> set[str]:
 
 
 def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
-         claim_companions: bool = True) -> tuple[list[Job], list[FileResult]]:
+         claim_companions: bool = True,
+         copy_unconverted: bool = True) -> tuple[list[Job], list[FileResult]]:
     """Classify inputs into jobs, grouping split terrain tiles.
 
     With ``claim_companions``, files that another job will pull in and rename
@@ -169,23 +174,20 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
                 adt_roots[key] = Path(root)
             continue
 
-        if kind == detect.SKEL:
-            res = FileResult(source=rel, kind="skel", status=Status.SKIPPED)
-            res.info("skel.companion",
-                     "skeletons are merged into the model that references them, "
-                     "not converted on their own")
+        action, reason = detect.classify(kind, str(path))
+        if action == detect.COPY and not copy_unconverted:
+            action, reason = detect.SKIP, (
+                "3.3.5a reads this format unchanged, but --no-copy-unconverted "
+                "was given")
+        if action == detect.SKIP:
+            res = FileResult(source=rel, kind=kind, status=Status.SKIPPED)
+            res.info("detect.skipped", reason)
             skipped.append(res)
             continue
 
-        if kind == detect.UNKNOWN:
-            res = FileResult(source=rel, kind="unknown", status=Status.SKIPPED)
-            res.info("detect.unknown", "unrecognised file format")
-            skipped.append(res)
-            continue
+        pending.append((root, path, kind, rel, action, reason))
 
-        pending.append((root, path, kind, rel))
-
-    for _root, path, kind, rel in pending:
+    for _root, path, kind, rel, action, reason in pending:
         if claim_companions and kind in (detect.SKIN, detect.ANIM, detect.WMO_GROUP):
             if path.name.lower() in claimed_names:
                 log.debug(f"skipping {rel}: converted as a companion")
@@ -194,7 +196,7 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
                 log.debug(f"skipping {rel}: converted as a companion "
                           f"(FileDataID {path.stem})")
                 continue
-        jobs.append(Job(kind=kind, source=path, relpath=rel))
+        jobs.append(Job(kind=kind, source=path, relpath=rel, action=action))
 
     for key, parts in sorted(adt_groups.items()):
         root_path = parts.get("root")
@@ -214,6 +216,122 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
     return jobs, skipped
 
 
+def plan_casc(storage, listfile: Listfile, *, include: Sequence[str] = (),
+              file_ids: Sequence[int] = (),
+              exclude: Sequence[str] = (),
+              claim_companions: bool = True,
+              copy_unconverted: bool = True
+              ) -> tuple[list[Job], list[FileResult]]:
+    """Choose files to pull out of a CASC install.
+
+    Selection is by in-game path glob, which needs the listfile, or by explicit
+    FileDataID, which does not. Files whose path is unknown are reported rather
+    than silently missed, because "the listfile is too old" is by far the most
+    common reason an extraction comes up short.
+    """
+    import fnmatch
+
+    jobs: list[Job] = []
+    skipped: list[FileResult] = []
+    patterns = [normalise_pattern(p) for p in include]
+    excludes = [normalise_pattern(p) for p in exclude]
+
+    selected: dict[int, str] = {}
+    for file_id in file_ids:
+        path = listfile.path_for(file_id) or f"{file_id}.unknown"
+        selected[file_id] = path
+
+    if patterns:
+        unknown = 0
+        for file_id in storage.file_ids():
+            path = listfile.path_for(file_id)
+            if path is None:
+                unknown += 1
+                continue
+            if not any(fnmatch.fnmatch(path, p) for p in patterns):
+                continue
+            if any(fnmatch.fnmatch(path, p) for p in excludes):
+                continue
+            selected[file_id] = path
+        if unknown:
+            log.info(f"{unknown} file(s) in this build have no listfile entry "
+                     f"and cannot be matched by path; select them by "
+                     f"--fileid if you need them")
+
+    claimed_ids: set[int] = set()
+    if claim_companions:
+        for file_id, path in selected.items():
+            if path.endswith((".m2", ".wmo")):
+                data, why = storage.try_read_file_id(file_id)
+                if data is not None:
+                    claimed_ids |= _companion_references(
+                        detect.detect(data, path), data)
+
+    # A tile's terrain, texture and object files are one job, as on disk.
+    adt_pieces: dict[str, dict[str, tuple[int, str]]] = {}
+
+    for file_id, path in sorted(selected.items(), key=lambda kv: kv[1]):
+        if claim_companions and file_id in claimed_ids:
+            log.debug(f"skipping {path}: converted as a companion")
+            continue
+        data, why = storage.try_read_file_id(file_id)
+        if data is None:
+            res = FileResult(source=path, kind="unknown", status=Status.SKIPPED)
+            res.info("casc.unavailable", why, file_id=file_id)
+            skipped.append(res)
+            continue
+        kind = detect.detect(data[:4096], path)
+        if path.endswith(".unknown"):
+            # No listfile entry: name it by FileDataID and detected type so it
+            # still lands somewhere predictable.
+            path = f"unknown\\{file_id}{detect.EXTENSIONS.get(kind, '.bin')}"
+        action, reason = detect.classify(kind, path)
+        if action == detect.COPY and not copy_unconverted:
+            action, reason = detect.SKIP, (
+                "3.3.5a reads this format unchanged, but --no-copy-unconverted "
+                "was given")
+        if action == detect.SKIP:
+            res = FileResult(source=path, kind=kind, status=Status.SKIPPED)
+            res.info("detect.skipped", reason, file_id=file_id)
+            skipped.append(res)
+            continue
+
+        if kind == detect.ADT:
+            base = detect.adt_base_name(path)
+            stem = os.path.splitext(os.path.basename(path))[0].lower()
+            piece = "root"
+            for suffix in detect.SPLIT_ADT_SUFFIXES:
+                if stem.endswith(suffix):
+                    piece = suffix.lstrip("_")
+                    break
+            adt_pieces.setdefault(base.lower(), {})[piece] = (file_id, path)
+            continue
+
+        jobs.append(Job(kind=kind, relpath=to_posix(path), file_id=file_id,
+                        action=action))
+
+    for base, pieces in sorted(adt_pieces.items()):
+        root_piece = pieces.get("root")
+        if root_piece is None:
+            names = ", ".join(p for _id, p in pieces.values())
+            res = FileResult(source=names, kind="adt", status=Status.SKIPPED)
+            res.info("adt.no_root",
+                     "split terrain pieces with no matching terrain file; "
+                     "widen the --include glob to take the tile's base .adt")
+            skipped.append(res)
+            continue
+        file_id, path = root_piece
+        jobs.append(Job(kind=detect.ADT, relpath=to_posix(path), file_id=file_id,
+                        extra_ids={k: v[0] for k, v in pieces.items()
+                                   if k in ("tex0", "obj0")}))
+    return jobs, skipped
+
+
+def normalise_pattern(pattern: str) -> str:
+    """Match the way listfile paths are stored: lowercase, backslashes."""
+    return pattern.replace("/", "\\").lower()
+
+
 # ---------------------------------------------------------------------------
 # Conversion
 # ---------------------------------------------------------------------------
@@ -221,11 +339,12 @@ class Converter:
     """Runs jobs and decides where their outputs land."""
 
     def __init__(self, opts: Options, listfile: Listfile,
-                 out_dir: Path, source: AssetSource):
+                 out_dir: Path, source: AssetSource, storage=None):
         self.opts = opts
         self.listfile = listfile
         self.out_dir = Path(out_dir)
         self.source = source
+        self.storage = storage
 
     # -- naming ---------------------------------------------------------
     def output_path(self, job: Job) -> Path:
@@ -240,13 +359,45 @@ class Converter:
         return self.out_dir / rel
 
     # -- work -----------------------------------------------------------
+    def read(self, job: Job) -> bytes:
+        if job.file_id is not None:
+            if self.storage is None:
+                raise ConverterError(
+                    f"{job.relpath} comes from a CASC install but no storage "
+                    f"is open")
+            return self.storage.read_file_id(job.file_id)
+        assert job.source is not None
+        return job.source.read_bytes()
+
     def convert(self, job: Job) -> list[Output]:
         started = time.time()
         target = self.output_path(job)
-        data = job.source.read_bytes()
         result = FileResult(source=job.relpath, kind=job.kind,
-                            target=str(target), bytes_in=len(data))
-        self.source.add_root(job.source.parent)
+                            target=str(target))
+        try:
+            data = self.read(job)
+        except ConverterError as exc:
+            result.status = Status.SKIPPED
+            result.info("io.unavailable", str(exc))
+            result.elapsed = time.time() - started
+            return [Output(target, b"", result)]
+        except Exception as exc:  # noqa: BLE001 - one bad file must not stop a run
+            result.fail("io.read", f"{type(exc).__name__}: {exc}")
+            result.elapsed = time.time() - started
+            return [Output(target, b"", result)]
+
+        result.bytes_in = len(data)
+        if job.source is not None:
+            self.source.add_root(job.source.parent)
+
+        if job.action == detect.COPY:
+            result.status = Status.PASSTHROUGH
+            result.kind = job.kind if job.kind != detect.UNKNOWN else "data"
+            result.info("copy.verbatim",
+                        "3.3.5a reads this format unchanged; copied into the "
+                        "output as-is")
+            result.elapsed = time.time() - started
+            return [Output(target, data, result)]
 
         try:
             outputs = self._dispatch(job, data, target, result)
@@ -303,13 +454,24 @@ class Converter:
             out, result = convert_group(data, job.relpath, opts, result)
             return [Output(target, out, result)]
 
+        if kind == detect.WDT:
+            out, result = convert_wdt(data, job.relpath, opts, result)
+            return [Output(target, out, result)]
+
         if kind == detect.ADT:
             parts = AdtParts(root=data)
             if opts.merge_split_adt:
-                if "tex0" in job.extra:
-                    parts.tex0 = job.extra["tex0"].read_bytes()
-                if "obj0" in job.extra:
-                    parts.obj0 = job.extra["obj0"].read_bytes()
+                for piece in ("tex0", "obj0"):
+                    if piece in job.extra:
+                        setattr(parts, piece, job.extra[piece].read_bytes())
+                    elif piece in job.extra_ids and self.storage is not None:
+                        raw, why = self.storage.try_read_file_id(
+                            job.extra_ids[piece])
+                        if raw is None:
+                            result.warn("adt.piece_unavailable",
+                                        f"{piece} piece unavailable: {why}")
+                        else:
+                            setattr(parts, piece, raw)
             out, result = convert_adt(parts, job.relpath, opts, self.listfile, result)
             return [Output(target, out, result)]
 
@@ -341,11 +503,18 @@ class Converter:
 _WORKER: dict[str, object] = {}
 
 
-def _worker_init(opts: Options, listfile_path: str | None,
-                 roots: list[str], out_dir: str) -> None:  # pragma: no cover
+def _worker_init(opts: Options, listfile_path: str | None, roots: list[str],
+                 out_dir: str, casc: dict | None) -> None:  # pragma: no cover
     lf = Listfile.load(listfile_path) if listfile_path else Listfile()
-    _WORKER["converter"] = Converter(opts, lf, Path(out_dir),
-                                     AssetSource(lf, roots=roots))
+    storage = None
+    if casc:
+        # Each worker opens its own handles; CascStorage is not picklable.
+        from .casc import CascStorage, KeyRing
+        keys = KeyRing.load(casc["keys"]) if casc.get("keys") else KeyRing()
+        storage = CascStorage.open(casc["path"], product=casc.get("product"),
+                                   locale=casc.get("locale", "enus"), keys=keys)
+    source = AssetSource(lf, roots=roots, casc=storage)
+    _WORKER["converter"] = Converter(opts, lf, Path(out_dir), source, storage)
 
 
 def _worker_run(job: Job) -> list[Output]:  # pragma: no cover
@@ -359,7 +528,8 @@ def _worker_run(job: Job) -> list[Output]:  # pragma: no cover
 def run(jobs: Sequence[Job], opts: Options, listfile: Listfile,
         out_dir: str | os.PathLike[str], roots: Sequence[str] = (),
         listfile_path: str | None = None,
-        skipped: Sequence[FileResult] = ()) -> Report:
+        skipped: Sequence[FileResult] = (),
+        storage=None, casc_args: dict | None = None) -> Report:
     """Convert every job, in parallel when asked, and collect the results."""
     report = Report()
     report.extend(skipped)
@@ -369,7 +539,8 @@ def run(jobs: Sequence[Job], opts: Options, listfile: Listfile,
         try:
             with ProcessPoolExecutor(
                     max_workers=opts.jobs, initializer=_worker_init,
-                    initargs=(opts, listfile_path, list(roots), str(out_dir))
+                    initargs=(opts, listfile_path, list(roots), str(out_dir),
+                              casc_args)
             ) as pool:
                 for outputs in pool.map(_worker_run, jobs):
                     for out in outputs:
@@ -379,8 +550,8 @@ def run(jobs: Sequence[Job], opts: Options, listfile: Listfile,
         except Exception as exc:  # noqa: BLE001 - fall back rather than fail
             log.warn(f"parallel execution unavailable ({exc}); running serially")
 
-    source = AssetSource(listfile, roots=list(roots))
-    converter = Converter(opts, listfile, out_dir, source)
+    source = AssetSource(listfile, roots=list(roots), casc=storage)
+    converter = Converter(opts, listfile, out_dir, source, storage)
     for job in jobs:
         log.debug(f"converting {job.describe()}")
         outputs = converter.convert(job)
