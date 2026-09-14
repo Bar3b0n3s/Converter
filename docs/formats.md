@@ -283,6 +283,61 @@ into whatever happens to be there.
 
 ---
 
+<a name="liquid"></a>
+## WLW / WLQ / WLM — liquid volumes
+
+These sit beside a map and describe the lakes, rivers and lava the terrain's
+own liquid grid cannot: volumes with real shape, the ones the client tests
+against when deciding whether you are swimming. 3.3.5a reads all three, so
+unlike the LOD and lighting sidecars they belong in a patch.
+
+| Offset | Field | Notes |
+|---|---|---|
+| 0x00 | `magic` | `LIQ*`; accepted in either byte order |
+| 0x04 | `version` | 3.3.5a reads 0 and 1 |
+| 0x06 | `liquidType` | water, lava, slime … |
+| 0x08 | `blockCount` | volume blocks that follow |
+
+What this tool does is deliberately narrower than a conversion. The header is
+well understood; the block layout after it is not documented well enough to
+rewrite safely, and a liquid volume rewritten wrongly puts swimmable water
+where there is none. So the version is checked and the body passed through
+untouched: a version Wrath reads is already the file the old client wants, and
+a newer one is refused by name rather than copied, because a client that
+cannot parse the body is worse off with the file than without it.
+
+If a build turns out to ship a version this refuses, that is the point at
+which the block layout has to be worked out — and the report says so, instead
+of leaving a misparsed file to be discovered in-game.
+
+---
+
+<a name="sidecars"></a>
+## Map sidecars — what is deliberately left out
+
+A modern map folder holds more than the tile. These share an extension with
+the map files they sit beside, so each is recognised by a chunk only it has:
+
+| File | Marker chunks | Holds |
+|---|---|---|
+| `_lgt.wdt` | `MPLT` `MPL2` `MPL3` `MLTA` | per-tile light definitions and animations |
+| `_occ.wdt` | `MAOI` `MAOH` | terrain occlusion hulls and heightmap |
+| `_fogs.wdt` | `MVFX` `VFOG` | volumetric fog |
+| `_mpv.wdt` | `MPVD` | particulate volumes |
+| `_lod.adt` | `MLHD` `MLVH` `MLLL` | the LOD terrain mesh |
+| `_tex1.adt` `_obj1.adt` | — | high-detail texture and object variants |
+
+3.3.5a keeps none of this and never looks for the files, so they are skipped
+with what they held rather than copied into the patch. The check runs *after*
+the map formats identify themselves, because a real `.wdl` carries the same
+LOD chunks a `_lod.adt` does and is told apart by the `MAOF` that makes it a
+heightmap.
+
+`_tex0` and `_obj0` are the exception: they are merged into the tile, and the
+report records them as carried by it rather than leaving them unmentioned.
+
+---
+
 ## CASC — reading a game install
 
 ```

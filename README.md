@@ -34,6 +34,7 @@ wotlkconv convert --casc "C:\World of Warcraft" --include "creature/**" \
 | `.adt` | Cataclysm+ split tiles | monolithic Wrath tile | rebuilds `MCIN`, merges `_tex0` and `_obj0` |
 | `.wdt` | BfA+ with `MAID` | 3.3.5a v17 | drops `MAID`, sets the big-alpha flag |
 | `.wdl` | Legion+ with the `ML*` LOD mesh | 3.3.5a heightmap | keeps `MAOF`/`MARE`/`MAHO`, rewrites every offset |
+| `.wlw` `.wlq` `.wlm` | liquid volumes | unchanged | version-checked; a version Wrath cannot parse is refused, not shipped |
 | `.db2` | WDC1–WDC5 (Legion 7.3 onwards) | `.dbc` | needs a DBD definition; the layout comes from the definition too |
 
 Companion files are found automatically and renamed into the layout the client
@@ -43,20 +44,49 @@ inputs were named.
 
 ## What it does with everything else
 
-A patch archive needs more than the art. Every file is put in one of three
+A patch archive needs more than the art. Every file lands in one of four
 buckets, and the report says which:
 
 - **Converted** — the formats in the table above.
 - **Copied through, byte for byte** — formats 3.3.5a reads unchanged: `.wav`,
-  `.mp3`, `.ogg`, `.avi`, `.lua`, `.xml`, `.toc`, `.ttf`, and anything with an
-  unfamiliar extension (carried through and flagged rather than dropped).
-  `--no-copy-unconverted` turns this off.
+  `.mp3`, `.ogg`, `.avi`, `.lua`, `.xml`, `.toc`, `.ttf`, `.tga`, `.zmp`,
+  `.trs`, and anything with an unfamiliar extension (carried through and
+  flagged rather than dropped). `--no-copy-unconverted` turns this off.
+- **Carried by another file** — a model's `.skin` profiles and `.anim` files,
+  a WMO's groups, a tile's `_tex0` and `_obj0` pieces. These are converted,
+  just not on their own: they are written under the name the client globs for,
+  by the asset that references them.
 - **Skipped, with the actual reason** — `.tex` streamed texture payloads,
-  `.phys` physics rigs, `.bone` overrides. `.skel` files are skipped because
-  they are merged into the model that references them, and `.db2` databases
-  because they need a definition (see below).
+  `.phys` physics rigs, `.bone` overrides, Wwise `.bnk`/`.wem` audio, `.mp4`
+  cinematics, compiled `.bls` shaders, `.dds`/`.png` textures, and the map
+  sidecars (`_lgt.wdt` lights, `_occ.wdt` occlusion, `_fogs.wdt`, `_mpv.wdt`,
+  `_lod.adt`) that carry data for systems Wrath does not have.
 
-Nothing is silently discarded.
+### Nothing is silently discarded, and the run proves it
+
+Every file is identified by its **signature**, not its extension. That matters
+most when reading a build straight out of CASC, where there are no filenames at
+all and the listfile never covers everything — a sound or a font recognised
+only by its extension has no extension to be recognised by, and would land as
+an anonymous `.bin` no client will ever look up.
+
+The run then counts what it did:
+
+```console
+$ wotlkconv convert world/maps/azeroth -o patch-4/
+6 file(s): 1 lossy, 2 merged, 3 skipped
+  every input accounted for: 1 written, 2 carried by another file, 3 skipped, 0 failed
+```
+
+Those numbers add up to the number of files read, and `--report` records the
+same totals as JSON. A format nobody anticipated cannot quietly disappear
+between the planner and the output — if the books did not balance, the run
+would say so.
+
+A file named as something convertible whose bytes are not that thing (a `.m2`
+that is not a model — truncated, encrypted or misnamed) is refused with the
+reason rather than copied: putting it in the patch only moves the failure into
+the client.
 
 ## Client databases
 
@@ -335,7 +365,7 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 404 tests, no network or game data needed
+python -m pytest tests/ -q      # 586 tests, no network or game data needed
 python -m ruff check src tests
 ```
 
