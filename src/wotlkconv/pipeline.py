@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import detect, log
-from .adt import AdtParts, convert_adt, convert_wdt
+from .adt import AdtParts, convert_adt, convert_wdl, convert_wdt
 from .blp import convert_blp
 from .db import DbdIndex, MappingLibrary, convert_db2, find_template
 from .errors import ConverterError
@@ -473,6 +473,10 @@ class Converter:
 
         if kind == detect.WDT:
             out, result = convert_wdt(data, job.relpath, opts, result)
+            return [Output(target, out, result)]
+
+        if kind == detect.WDL:
+            out, result = convert_wdl(data, job.relpath, opts, result)
             return [Output(target, out, result)]
 
         if kind == detect.ADT:

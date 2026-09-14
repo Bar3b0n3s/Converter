@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, detect, log
-from .adt import inspect_adt, inspect_wdt
+from .adt import inspect_adt, inspect_wdl, inspect_wdt
 from .blp import inspect_blp
 from .casc import CascStorage, KeyRing
 from .db import DbdIndex, MappingLibrary, convert_db2, find_template, table_name_for
@@ -42,6 +42,7 @@ _INSPECTORS = {
     detect.WMO_GROUP: inspect_group,
     detect.ADT: inspect_adt,
     detect.WDT: inspect_wdt,
+    detect.WDL: inspect_wdl,
     detect.DBC: inspect_dbc,
 }
 

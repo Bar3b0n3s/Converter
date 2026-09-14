@@ -845,3 +845,47 @@ def build_skin_for(submesh_vertex_lists, *, legion: bool = False,
         head += struct.pack("<II", 0, 0)
     assert len(head) == header_size
     return bytes(head) + bytes(payload)
+
+
+# ---------------------------------------------------------------------------
+# WDL
+# ---------------------------------------------------------------------------
+def build_wdl(*, tiles=((0, 0), (32, 48)), holes: bool = True,
+              lod_mesh: bool = True, version: int = 18,
+              wmo_tables: bool = False, mare_size: int | None = None) -> bytes:
+    """A .wdl with a heightmap for `tiles`, optionally Legion's LOD mesh."""
+    from wotlkconv.adt.wdl import MAHO_SIZE, MAOF_ENTRIES, MARE_SIZE
+
+    out = bytearray()
+
+    def add(name: str, payload: bytes) -> int:
+        at = len(out)
+        out.extend(name[::-1].encode("latin-1"))
+        out.extend(struct.pack("<I", len(payload)))
+        out.extend(payload)
+        return at
+
+    add("MVER", struct.pack("<I", version))
+    if wmo_tables:
+        add("MWMO", b"world/wmo/a.wmo\0")
+        add("MWID", struct.pack("<I", 0))
+        add("MODF", b"\0" * 64)
+    if lod_mesh:
+        add("MLHD", b"\0" * 16)
+        add("MLVH", b"\0" * 32)
+
+    maof_at = add("MAOF", b"\0" * (MAOF_ENTRIES * 4))
+    maof_data = maof_at + 8
+    size = MARE_SIZE if mare_size is None else mare_size
+    for n, (x, y) in enumerate(tiles):
+        index = y * 64 + x
+        # A recognisable height per tile, so a mix-up in the index shows up.
+        payload = struct.pack("<h", 100 + n) * (size // 2)
+        struct.pack_into("<I", out, maof_data + index * 4, add("MARE", payload))
+        if holes:
+            add("MAHO", struct.pack("<H", n + 1) * (MAHO_SIZE // 2))
+
+    if lod_mesh:
+        add("MLND", b"\0" * 16)
+        add("MLFD", b"\0" * 8)
+    return bytes(out)

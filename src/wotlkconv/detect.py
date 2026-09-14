@@ -20,6 +20,7 @@ WMO_ROOT = "wmo"
 WMO_GROUP = "wmo-group"
 ADT = "adt"
 WDT = "wdt"
+WDL = "wdl"
 DB2 = "db2"
 DBC = "dbc"
 UNKNOWN = "unknown"
@@ -32,7 +33,7 @@ SKIP = "skip"         # cannot be used by 3.3.5a, or is handled elsewhere
 #: Kinds this tool converts. Client databases are handled separately: they
 #: need a definition, a mapping and usually the user's own table as a template,
 #: so they only join a `convert` run once --dbd is supplied.
-CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT}
+CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT, WDL}
 
 #: Extensions the 3.3.5a client reads as-is. A patch archive needs these just
 #: as much as the converted files, so they are copied rather than dropped.
@@ -57,8 +58,6 @@ UNSUPPORTED_EXTENSIONS = {
     ".mp4": "3.3.5a plays .avi cinematics, not .mp4",
     ".wwise": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
     ".bnk": "Wwise audio banks; 3.3.5a plays loose .wav/.mp3/.ogg",
-    ".wdl": "low-resolution terrain heightmaps; the 3.3.5a layout differs and "
-            "this tool does not convert them yet",
     ".anim.skel": "unused",
 }
 
@@ -66,6 +65,7 @@ UNSUPPORTED_EXTENSIONS = {
 EXTENSIONS = {
     M2: ".m2", SKIN: ".skin", ANIM: ".anim", SKEL: ".skel", BLP: ".blp",
     WMO_ROOT: ".wmo", WMO_GROUP: ".wmo", ADT: ".adt", WDT: ".wdt",
+    WDL: ".wdl",
     DB2: ".db2", DBC: ".dbc",
 }
 
@@ -118,6 +118,8 @@ def detect(data: bytes, path: str = "") -> str:
             return ADT
         if "MPHD" in names or "MAIN" in names:
             return WDT
+        if "MAOF" in names:
+            return WDL
         if names[0] == "MVER" and len(names) == 1:
             # MVER-only files are split ADT pieces whose payload chunks follow.
             return ADT
@@ -129,6 +131,8 @@ def detect(data: bytes, path: str = "") -> str:
         return ADT
     if ext == ".skel":
         return SKEL
+    if ext == ".wdl":
+        return WDL
     return UNKNOWN
 
 

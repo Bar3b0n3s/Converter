@@ -9,6 +9,7 @@ import fixtures as F
 from conftest import LISTFILE_ENTRIES
 from wotlkconv import detect
 from wotlkconv.blp.blp import PreferredFormat
+from wotlkconv.chunks import ChunkReader
 from wotlkconv.cli import main
 from wotlkconv.listfile import Listfile
 from wotlkconv.options import Options
@@ -476,3 +477,24 @@ def test_cli_casc_extract_is_raw(casc_install, tmp_path, capsys):
     assert extracted.is_file()
     # extract does not convert: the file is still the chunked original
     assert extracted.read_bytes()[:4] == b"MD21"
+
+
+def test_a_wdl_is_recognised_and_converted(tmp_path):
+    """It used to be listed as unsupported; now it goes through the pipeline."""
+    src = tmp_path / "in"
+    (src / "world/maps/azeroth").mkdir(parents=True)
+    wdl = src / "world/maps/azeroth/azeroth.wdl"
+    wdl.write_bytes(F.build_wdl())
+
+    assert detect.detect(wdl.read_bytes(), str(wdl)) == detect.WDL
+    assert detect.classify(detect.WDL, str(wdl))[0] == "convert"
+
+    out = tmp_path / "out"
+    jobs, skipped = plan([src])
+    report = run(jobs, Options(), Listfile(), out, roots=[str(src)],
+                 skipped=skipped)
+    assert [r.status.value for r in report.files] == ["lossy"]
+    written = out / "world/maps/azeroth/azeroth.wdl"
+    assert written.exists()
+    assert "MLHD" not in [c.name for c in ChunkReader(written.read_bytes(),
+                                                      reverse=True)]
