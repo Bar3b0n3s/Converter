@@ -60,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 examples:
+  # the whole job: extract a game install and convert all of it
+  wotlkconv build --casc "/games/World of Warcraft" -o patch-4/ --fetch
+
   # one model, with its skins and animations picked up automatically
   wotlkconv convert Bear.m2 -o out/ --listfile listfile.csv
 
@@ -234,6 +237,37 @@ examples:
     pl.add_argument("inputs", nargs="+", metavar="IN")
     pl.add_argument("--no-recursive", action="store_true")
 
+    # -- build ----------------------------------------------------------
+    bld = sub.add_parser("build", parents=[common, casc_opts, db_opts],
+                         help="extract and convert a whole patch in one go")
+    bld.add_argument("inputs", nargs="*", metavar="IN",
+                     help="folders to build from; omit when reading --casc")
+    bld.add_argument("-o", "--out", required=True, metavar="DIR",
+                     help="destination directory for the finished patch")
+    bld.add_argument("-l", "--listfile", metavar="PATH",
+                     help="community listfile; fetched with --fetch if absent")
+    bld.add_argument("-s", "--search-dir", action="append", default=[],
+                     metavar="DIR")
+    bld.add_argument("--fetch", action="store_true",
+                     help="download the community listfile and WoWDBDefs if "
+                          "they are not already present, and cache them")
+    bld.add_argument("--cache-dir", metavar="DIR",
+                     help="where --fetch keeps its downloads "
+                          "(default: ~/.cache/wotlkconv)")
+    bld.add_argument("--include", action="append", default=[], metavar="GLOB",
+                     help="narrow the build to matching in-game paths; the "
+                          "default is the whole build")
+    bld.add_argument("--exclude", action="append", default=[], metavar="GLOB")
+    bld.add_argument("--include-from", metavar="PATH")
+    bld.add_argument("--fileid", action="append", default=[], type=int,
+                     metavar="ID")
+    bld.add_argument("-j", "--jobs", type=int, default=1, metavar="N")
+    bld.add_argument("-f", "--overwrite", action="store_true")
+    bld.add_argument("-n", "--dry-run", action="store_true")
+    bld.add_argument("--report", metavar="PATH",
+                     help="where to write the JSON report "
+                          "(default: <out>/wotlkconv-report.json)")
+
     # -- casc -----------------------------------------------------------
     casc = sub.add_parser("casc", parents=[common, casc_opts],
                           help="inspect or extract from a game install")
@@ -406,9 +440,12 @@ def cmd_convert(args: argparse.Namespace) -> int:
                       "Use --include '**' to take the whole build, but expect "
                       "millions of files")
             return 1
-        if includes and not listfile:
+        # "everything" needs no paths to match against; anything narrower does.
+        selective = [g for g in includes if normalise_pattern(g) != "**"]
+        if selective and not listfile:
             log.error("--include matches against in-game paths, which need a "
-                      "listfile; pass --listfile, or select by --fileid instead")
+                      "listfile; pass --listfile, select by --fileid, or use "
+                      "--include '**' to take the whole build without one")
             return 1
         storage, casc_args = _open_casc(args, search_dirs)
         # Say what this install actually holds before converting anything: a
@@ -613,6 +650,61 @@ def _parse_where(entries) -> list[tuple[str, str]]:
     return out
 
 
+def cmd_build(args: argparse.Namespace) -> int:
+    """Do the whole job: extract, convert, copy, and write the report.
+
+    Everything here is reachable through ``convert``; what this adds is the
+    defaults that make "build me a patch" one command rather than four flags
+    and two downloads.  It fills in the two references a conversion needs and
+    then hands over to the same pipeline, so there is one code path to be
+    right about.
+    """
+    cache = Path(args.cache_dir) if args.cache_dir else None
+
+    if args.fetch:
+        from .fetch import fetch_definitions, fetch_listfile
+
+        if not args.listfile:
+            args.listfile = str(fetch_listfile(cache))
+        if not args.dbd:
+            args.dbd = str(fetch_definitions(cache))
+
+    # The whole build is the point of the command; --include narrows it.
+    if args.casc and not args.include and not args.fileid \
+            and not args.include_from:
+        args.include = ["**"]
+
+    search_dirs = [Path(p) for p in args.search_dir]
+    if args.casc:
+        search_dirs.append(Path(args.casc))
+    if not args.listfile and not Listfile.discover(None, search_dirs):
+        log.warn("no listfile: modern assets name their textures and models by "
+                 "FileDataID, and without one those references cannot be turned "
+                 "back into paths. Pass --listfile, or --fetch to download it")
+    if not args.dbd and not DbdIndex.discover(None, search_dirs):
+        log.warn("no DBD definitions: every .db2 will be skipped, so nothing "
+                 "will point at the models you convert. Pass --dbd, or --fetch "
+                 "to download them")
+
+    args.report = args.report or str(Path(args.out) / "wotlkconv-report.json")
+    # Options convert does not expose here, at their usual defaults.
+    for name, value in (("no_recursive", False), ("unresolved", "placeholder"),
+                        ("path_prefix", ""), ("keep_numeric_names", False),
+                        ("flatten", False), ("texture_format", "auto"),
+                        ("max_texture_size", 0), ("allow_npot", False),
+                        ("dxt1_alpha_cutoff", 128), ("strip_particles", False),
+                        ("strip_ribbons", False), ("strip_cameras", False),
+                        ("strip_lights", False),
+                        ("allow_missing_skeleton", False),
+                        ("no_companions", False), ("strict", False),
+                        ("no_merge_adt", False), ("reference_adt", None),
+                        ("no_split_groups", False), ("split_models", False),
+                        ("no_copy_unconverted", False)):
+        if not hasattr(args, name):
+            setattr(args, name, value)
+    return cmd_convert(args)
+
+
 def cmd_casc(args: argparse.Namespace) -> int:
     import fnmatch
 
@@ -724,6 +816,7 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "convert": cmd_convert,
+        "build": cmd_build,
         "inspect": cmd_inspect,
         "plan": cmd_plan,
         "listfile": cmd_listfile,

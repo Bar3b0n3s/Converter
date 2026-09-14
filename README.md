@@ -20,6 +20,36 @@ wotlkconv convert --casc "C:\World of Warcraft" --include "creature/**" \
                   -o patch-4/ --listfile listfile.csv -j4
 ```
 
+## The short version
+
+One command takes a game install and produces a patch:
+
+```bash
+wotlkconv build --casc "/games/World of Warcraft" -o patch-4/ --fetch
+```
+
+`build` selects the whole install, converts everything that needs converting,
+copies through everything 3.3.5a already reads, and writes a report of what
+happened to every file. `--fetch` downloads the two things the game does not
+ship — the [community listfile](https://github.com/wowdev/wow-listfile), which
+turns FileDataIDs back into paths, and
+[WoWDBDefs](https://github.com/wowdev/WoWDBDefs), without which every database
+is refused — and caches them for next time. Supply them yourself with
+`--listfile` and `--dbd` and you never need the network.
+
+It works without either, too: files the listfile cannot name arrive under their
+FileDataID, and the run says so rather than quietly coming up short.
+
+Narrow it when you do not want everything:
+
+```bash
+wotlkconv build --casc "/games/World of Warcraft" -o patch-4/ \
+    --include "creature/**" --include "world/wmo/**" -j8
+```
+
+`convert` is the same pipeline with nothing assumed for you — every flag
+explicit, and a selection you have to state.
+
 ## What it converts
 
 | Format | From | To | Notes |
@@ -376,7 +406,7 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 646 tests, no network or game data needed
+python -m pytest tests/ -q      # 661 tests, no network or game data needed
 python -m ruff check src tests
 ```
 

@@ -274,21 +274,28 @@ def plan_casc(storage, listfile: Listfile, *, include: Sequence[str] = (),
         selected[file_id] = path
 
     if patterns:
-        unknown = 0
+        # "**" is the whole build and needs no path to match against, so a file
+        # the listfile does not name is still taken -- it just arrives under
+        # its FileDataID. Any narrower pattern does need a name.
+        take_all = any(p == "**" for p in patterns)
+        unnamed = 0
         for file_id in storage.file_ids():
             path = listfile.path_for(file_id)
             if path is None:
-                unknown += 1
+                if not take_all:
+                    unnamed += 1
+                    continue
+                selected[file_id] = f"{file_id}.unknown"
                 continue
             if not any(fnmatch.fnmatch(path, p) for p in patterns):
                 continue
             if any(fnmatch.fnmatch(path, p) for p in excludes):
                 continue
             selected[file_id] = path
-        if unknown:
-            log.info(f"{unknown} file(s) in this build have no listfile entry "
+        if unnamed:
+            log.info(f"{unnamed} file(s) in this build have no listfile entry "
                      f"and cannot be matched by path; select them by "
-                     f"--fileid if you need them")
+                     f"--fileid, or take the whole build with --include '**'")
 
     claimed_ids: set[int] = set()
     if claim_companions:
