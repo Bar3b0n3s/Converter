@@ -89,9 +89,6 @@ class TableMapping:
     #: Columns whose value is a row id and so must move with --id-offset,
     #: whether they were mapped explicitly or matched by name.
     id_offset_columns: tuple[str, ...] = ()
-    #: False when the field count has not been checked against a real client
-    #: .dbc; the converter then presses for --template.
-    verified: bool = False
     source: str = "<builtin>"
 
     @classmethod
@@ -102,7 +99,6 @@ class TableMapping:
             id_index=int(payload.get("id_index", 0)),
             description=payload.get("description", ""),
             id_offset_columns=tuple(payload.get("id_offset_columns", [])),
-            verified=bool(payload.get("verified", False)),
             source=source,
         )
         seen: set[tuple] = set()

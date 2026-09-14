@@ -254,6 +254,35 @@ same thing, because the two files are often converted separately.
 
 ---
 
+<a name="wdl"></a>
+## WDL — low-resolution heightmaps
+
+What the client draws on the horizon before real terrain streams in. One 17x17
+grid of 16-bit heights, plus the 16x16 grid between those points, stands in for
+each of the map's 64x64 tiles.
+
+| Chunk | Holds | Converted to |
+|---|---|---|
+| `MAOF` | 64x64 absolute file offsets, one per tile | rewritten for the new layout |
+| `MARE` | the 17x17 and 16x16 height grids (1090 bytes) | kept verbatim |
+| `MAHO` | one 16-bit hole mask per inner row | kept verbatim |
+| `MWMO`/`MWID`/`MODF` | low-detail WMO placements | kept, or emitted empty |
+| `ML*` | Legion's LOD mesh: vertices, indices, skirts, liquid, placements | dropped |
+
+The heightmap itself never changed. What Legion added is a separate thing
+sharing the file — a real LOD mesh, with its own copies of the doodad and WMO
+placements, for a renderer 3.3.5a does not have.
+
+The catch is `MAOF`: its 4096 entries are absolute file offsets, so dropping
+anything ahead of the `MARE` blocks moves every one of them and they all have
+to be rewritten. Wrath also expects the low-detail WMO tables that Legion
+stopped writing, so empty ones are emitted to keep the file the shape the old
+client reads. An offset that does not lead to a `MARE` of the right size is
+reported (`wdl.tiles.unreadable`) and the tile left empty, rather than followed
+into whatever happens to be there.
+
+---
+
 ## CASC — reading a game install
 
 ```
@@ -354,27 +383,43 @@ Two spellings the client insists on, handled by transforms:
 ---
 
 <a name="assumptions"></a>
-## Assumptions where the format is ambiguous
+## Where the format is ambiguous, and how it is settled
 
-Two values are not pinned down by the published documentation, and were chosen
-for internal consistency. If converted terrain misbehaves in a client, check
-these first — they are isolated and easy to flip.
+Three things the published documentation leaves open used to be chosen for
+internal consistency and left at that. None of them is a standing assumption
+any more: each is either decided from data the file itself carries, or checkable
+against something you already have.
 
-**`MCIN[i].size` includes the 8-byte chunk header.** `MCIN.offset` points at
-the `MCNK` magic, so `offset + size` lands exactly on the next chunk. The
-documentation only says "the size of the MCNK chunk". Written in
-`src/wotlkconv/adt/convert.py`.
+**`.anim` track offsets: the `AFM2` payload, or the whole file?** Being wrong
+by eight bytes does not crash, it animates wrongly, which is the worst kind of
+wrong. It is no longer guessed. A model names, for each sequence it keeps
+outside itself, the exact `(offset, length)` of every keyframe array the
+`.anim` is expected to hold; those spans have to fit the file, and an `.anim`
+exists to hold them and nothing else, so under the right reading the last one
+also ends exactly where the file does. Both readings are tested against the
+spans per file, and the payload is emitted to match whichever one they support
+— `anim.offsets.payload` or `anim.offsets.file` in the report says which, and
+`anim.offsets.unmeasured` says when the model named nothing to measure.
+Written in `src/wotlkconv/m2/anim.py`.
 
-**`.anim` track offsets are relative to the `AFM2` payload, not the file.**
-Extracting the chunk body therefore leaves them valid. This is the only
-self-consistent reading — a whole-file base would break as soon as the chunk
-moved — but it has not been checked against a client. Written in
-`src/wotlkconv/m2/anim.py`.
+**`MCIN[i].size`: the payload, or the payload plus the chunk header?** The
+offset is unambiguous — it points at the `MCNK` magic — so a reader that seeks
+there and then trusts the chunk's own size field, as the client does, cannot be
+misled either way. Only a tool that takes `MCIN`'s size as the extent of the
+chunk can be, and for that reader the header-inclusive value is the safe one:
+it spans the whole chunk, where the payload-only value stops eight bytes short
+and cuts the end off the last sub-chunk. That is the default, and
+`--reference-adt` reads the convention straight off any genuine 3.3.5a tile by
+comparing each entry's size against the size the chunk itself declares.
+Written in `src/wotlkconv/adt/convert.py`.
 
-**The built-in DBC field counts and column indices.** These are the least
-certain thing in the project: the 3.3.5a layouts are not in any file the tool
-can read, and they came from documentation rather than from a client. Every
-built-in mapping is marked `"verified": false`, the tool warns when it uses one
-without a template, and it hard-fails when a template disagrees. Pass
-`--template-dir` pointing at your own client's `dbc` folder and the guesswork
-disappears. Written in `src/wotlkconv/db/builtin/*.json`.
+**The 3.3.5a DBC layouts.** These used to be the least certain thing in the
+project — hand-written field counts and column indices that came from
+documentation rather than from a client. They are no longer written down at
+all. DBDefs carries a `BUILD 3.3.5.12340` layout for every table that existed
+in Wrath, naming each column in order with its type and array size, and that is
+where the layout now comes from; a `--template` `.dbc` cross-checks the width
+and hard-fails on disagreement. A table the definitions do not cover for that
+build is refused rather than guessed at, because a `.dbc` records how many
+columns there are and never what belongs in them. Written in
+`src/wotlkconv/db/target.py`.

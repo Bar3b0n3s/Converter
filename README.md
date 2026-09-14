@@ -33,7 +33,8 @@ wotlkconv convert --casc "C:\World of Warcraft" --include "creature/**" \
 | `.wmo` group | Shadowlands `MOVX`/`MPY2` | `MOVI`/`MOPY` | recomputes batch bounds, trims UV/colour layers |
 | `.adt` | Cataclysm+ split tiles | monolithic Wrath tile | rebuilds `MCIN`, merges `_tex0` and `_obj0` |
 | `.wdt` | BfA+ with `MAID` | 3.3.5a v17 | drops `MAID`, sets the big-alpha flag |
-| `.db2` | WDC1–WDC5 (Legion 7.3 onwards) | `.dbc` | needs a DBD definition and a per-table mapping |
+| `.wdl` | Legion+ with the `ML*` LOD mesh | 3.3.5a heightmap | keeps `MAOF`/`MARE`/`MAHO`, rewrites every offset |
+| `.db2` | WDC1–WDC5 (Legion 7.3 onwards) | `.dbc` | needs a DBD definition; the layout comes from the definition too |
 
 Companion files are found automatically and renamed into the layout the client
 globs for — `Bear.m2` gets `Bear00.skin` … `Bear03.skin` and
@@ -51,10 +52,9 @@ buckets, and the report says which:
   unfamiliar extension (carried through and flagged rather than dropped).
   `--no-copy-unconverted` turns this off.
 - **Skipped, with the actual reason** — `.tex` streamed texture payloads,
-  `.phys` physics rigs, `.bone` overrides, `.wdl` low-resolution heightmaps.
-  `.skel` files are skipped because they are merged into the model that
-  references them, and `.db2` databases because they need a definition and a
-  mapping (see below).
+  `.phys` physics rigs, `.bone` overrides. `.skel` files are skipped because
+  they are merged into the model that references them, and `.db2` databases
+  because they need a definition (see below).
 
 Nothing is silently discarded.
 
@@ -74,9 +74,12 @@ wotlkconv db convert CreatureDisplayInfo.db2 -o out/ \
     --id-offset 200000
 ```
 
-- **`--dbd`** gives the columns names. A `.db2` carries none; the community
-  definitions supply them, matched on the file's own layout hash. Without it a
-  conversion refuses rather than mapping columns by position.
+- **`--dbd`** gives the columns names — on *both* sides. A `.db2` carries none,
+  and the community definitions supply them, matched on the file's own layout
+  hash; the same definitions also carry a `BUILD 3.3.5.12340` layout naming
+  every column that build's table had, in order, which is where the shape of
+  the `.dbc` being written comes from. Without it a conversion refuses rather
+  than mapping columns by position.
 - **`--template-dir`** points at *your* client's `.dbc` files. Each table's own
   file verifies the layout and is merged onto, so the rows you already have
   survive and the new ones are appended.
@@ -92,13 +95,22 @@ than read**: they lay records out differently enough that reading one as a WDC
 would produce plausible wrong values instead of an error. Every build that
 ships assets worth converting is WDC1 or later.
 
-`wotlkconv db tables` lists the built-in mappings. They are plain JSON —
-`--db-mappings DIR` overrides any of them, and adding a table means writing one
-file, not changing code.
+Because both sides are named, most columns map themselves: a modern
+`CollisionHeight` and a Wrath `CollisionHeight` are the same field, matched by
+name and type. A mapping file only has to describe what actually changed — the
+FileDataIDs that used to be paths, and the handful Blizzard renamed — so a
+table with no mapping at all still converts. Any 3.3.5a column left without a
+source is reported by name rather than quietly written as zero.
 
-**The built-in field counts have not been checked against a real client.**
-Without `--template` the tool says so; with one it hard-fails on any
-disagreement rather than writing a misaligned table. Use a template.
+`wotlkconv db tables` lists the built-in mappings and what each one rewrites.
+They are plain JSON — `--db-mappings DIR` overrides any of them, and adding a
+table means writing one file, not changing code.
+
+A `--template` is still worth passing: it cross-checks the derived layout and
+hard-fails on disagreement. It cannot *replace* the definition, though — a
+`.dbc` records how many columns there are, never what belongs in them, so a
+table the definitions do not cover for 3.3.5a is refused rather than filled in
+by position. (A mapping can pin columns by `index` if you have to force it.)
 
 ## Meshes too big for 16-bit indices
 
@@ -323,7 +335,7 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 346 tests, no network or game data needed
+python -m pytest tests/ -q      # 404 tests, no network or game data needed
 python -m ruff check src tests
 ```
 

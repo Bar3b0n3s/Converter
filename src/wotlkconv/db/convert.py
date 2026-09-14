@@ -142,8 +142,7 @@ def convert_db2(data: bytes, source_name: str, opts: Options,
     if mapping is None:
         # Nothing table-specific to say: both sides are named, so the columns
         # that kept their names map themselves.
-        mapping = TableMapping(table=table_name, source="<auto>",
-                               id_index=0, verified=True)
+        mapping = TableMapping(table=table_name, source="<auto>", id_index=0)
 
     # -- template cross-check ---------------------------------------------
     template: DbcTable | None = None

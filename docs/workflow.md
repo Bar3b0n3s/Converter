@@ -38,11 +38,20 @@ files      1583921
 encoding   1621004 content keys
 indices    16 bucket(s), 1204553 entries
 keys       0 encryption key(s) loaded
+local      18447 of 20000 files sampled from 1583921 (92.2%) are stored on
+           this machine; 1553 would have to come from the CDN and 0 have no
+           encoding entry
+           this tool reads only what is on disk; it never fetches from the CDN,
+           so those files are reported as not installed rather than downloaded.
 ```
 
-`files` counts what the build defines; `indices` counts what is actually on
-this machine. A large gap means a partial install streaming from the CDN — the
-converter will report those files as unavailable rather than fetching them.
+`files` counts what the build defines; `local` counts what can actually be read
+here. A modern install is a catalogue with a cache behind it, so the two differ
+on most machines — the converter reports the difference as files that are not
+installed, and never fetches them. If something you want is in the gap, run the
+game's own updater. `--coverage-sample N` measures a spread subset instead of
+the whole root table; a conversion run over an install with gaps warns about
+them before converting anything.
 
 If you need encrypted content, pass a community key ring:
 
