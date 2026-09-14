@@ -48,19 +48,22 @@ A patch archive needs more than the art. Every file lands in one of four
 buckets, and the report says which:
 
 - **Converted** — the formats in the table above.
-- **Copied through, byte for byte** — formats 3.3.5a reads unchanged: `.wav`,
-  `.mp3`, `.ogg`, `.avi`, `.lua`, `.xml`, `.toc`, `.ttf`, `.tga`, `.zmp`,
-  `.trs`, and anything with an unfamiliar extension (carried through and
-  flagged rather than dropped). `--no-copy-unconverted` turns this off.
+- **Copied through, byte for byte** — formats 3.3.5a reads unchanged: `.ogg`,
+  `.mp3`, `.wav`, `.avi`, `.sbt` cinematic subtitles, `.lua`, `.xml`, `.toc`,
+  `.xsd`, `.ttf`, `.zmp`, `.wtf`, and anything with an unfamiliar extension
+  (carried through and flagged rather than dropped).
+  `--no-copy-unconverted` turns this off.
 - **Carried by another file** — a model's `.skin` profiles and `.anim` files,
   a WMO's groups, a tile's `_tex0` and `_obj0` pieces. These are converted,
   just not on their own: they are written under the name the client globs for,
   by the asset that references them.
 - **Skipped, with the actual reason** — `.tex` streamed texture payloads,
-  `.phys` physics rigs, `.bone` overrides, Wwise `.bnk`/`.wem` audio, `.mp4`
-  cinematics, compiled `.bls` shaders, `.dds`/`.png` textures, and the map
-  sidecars (`_lgt.wdt` lights, `_occ.wdt` occlusion, `_fogs.wdt`, `_mpv.wdt`,
-  `_lod.adt`) that carry data for systems Wrath does not have.
+  `.phys` physics rigs, `.bone` overrides, `.mdx` pre-Wrath models, compiled
+  `.bls` shaders, `.png`/`.tga` art, per-asset `.meta` records, the
+  `.pm4`/`.pd4` development pathing data, the map sidecars (`_lgt.wdt` lights,
+  `_occ.wdt` occlusion, `_fogs.wdt`, `_mpv.wdt`, `_lod.adt`) that carry data
+  for systems Wrath does not have, and the launcher and operating-system files
+  that travel in the same archives.
 
 ### Nothing is silently discarded, and the run proves it
 
@@ -69,6 +72,14 @@ most when reading a build straight out of CASC, where there are no filenames at
 all and the listfile never covers everything — a sound or a font recognised
 only by its extension has no extension to be recognised by, and would land as
 an anonymous `.bin` no client will ever look up.
+
+The list of formats is not written from memory. It is checked against the
+[community listfile](https://github.com/wowdev/wow-listfile) — every filename in
+every build Blizzard has published, 2,218,381 of them — and
+`tests/listfile_extensions.py` holds the resulting census. A test asserts both
+directions: every extension the game ships gets a deliberate decision (100% of
+named files, weighted by count), and nothing is claimed that the game does not
+actually contain.
 
 The run then counts what it did:
 
@@ -365,7 +376,7 @@ converter is a pure function of bytes, so they parallelise without shared state.
 ## Development
 
 ```bash
-python -m pytest tests/ -q      # 586 tests, no network or game data needed
+python -m pytest tests/ -q      # 646 tests, no network or game data needed
 python -m ruff check src tests
 ```
 

@@ -438,6 +438,32 @@ Two spellings the client insists on, handled by transforms:
 ---
 
 <a name="assumptions"></a>
+## Versions, and what happens outside them
+
+Every converter applies one layout. These are the headers that say whether it
+applies, and what each converter does when a file disagrees:
+
+| Format | Understood | Older | Newer |
+|---|---|---|---|
+| M2 | 264–274 | refused — this tool converts down, not up | read with the newest schemas, and flagged |
+| WMO | 17 | refused — v14 is a different layout wearing the same magic | read as v17, and flagged |
+| ADT / WDT / WDL | `MVER` 18 | flagged | flagged |
+| BLP | BLP2 v1 | BLP1 refused | unknown compression refused |
+| liquid | 0–1 | — | refused, by version number |
+
+Nothing downstream branches on the ADT, WDT or WDL version, which is exactly
+why reading it is worth doing: a file declaring something else is being parsed
+on an assumption nobody stated.
+
+A chunk in neither the Wrath set nor the known-modern set — one Blizzard adds
+after this was written, or one nobody documented — is dropped, because there is
+no other option, but it is named in the report and makes the file lossy. That
+covers M2, WMO roots and groups, ADT (top level and inside each `MCNK`), WDT
+and WDL.
+
+---
+
+<a name="assumptions"></a>
 ## Where the format is ambiguous, and how it is settled
 
 Three things the published documentation leaves open used to be chosen for
