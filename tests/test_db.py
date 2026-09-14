@@ -11,7 +11,10 @@ from wotlkconv.db.db2 import inspect_db2, parse_db2
 from wotlkconv.db.dbc import DbcBuilder, DbcTable, inspect_dbc
 from wotlkconv.db.dbd import DbdIndex, parse_definition
 from wotlkconv.db.mapping import (MappingLibrary, TableMapping,
-                                  TransformContext, apply_row, missing_sources)
+                                  TransformContext, apply_row,
+                                  missing_sources, resolve_columns)
+from wotlkconv.db.target import (auto_map, cross_check, layout_from_dbd,
+                                 layout_from_field_count)
 from wotlkconv.errors import (ConversionError, MalformedFileError,
                               MissingDependencyError, UnsupportedFormatError)
 from wotlkconv.listfile import Listfile
@@ -364,58 +367,163 @@ def test_inspect_dbc():
 
 
 # ---------------------------------------------------------------------------
-# Mapping
+# Target layout and mapping
 # ---------------------------------------------------------------------------
-def test_builtin_mappings_load_and_are_self_consistent():
+WOTLK_MODEL_COLUMNS = [
+    DF.Col("ID", "int", 32, is_id=True),
+    DF.Col("Flags", "int", 32),
+    DF.Col("ModelName", "string", 32),
+    DF.Col("SizeClass", "int", 32),
+    DF.Col("ModelScale", "float", 32),
+    DF.Col("BloodID", "int", 32),
+    DF.Col("SoundID", "int", 32),
+    DF.Col("CollisionWidth", "float", 32),
+    DF.Col("CollisionHeight", "float", 32),
+    DF.Col("MountHeight", "float", 32),
+]
+
+
+def test_the_target_layout_comes_from_the_wotlk_build_definition():
+    text = DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4",
+                        wotlk_columns=WOTLK_MODEL_COLUMNS)
+    target = layout_from_dbd(parse_definition(text, "CreatureModelData"))
+    assert target is not None
+    assert target.build == "3.3.5.12340"
+    assert target.field_count == len(WOTLK_MODEL_COLUMNS)
+    assert target.column_names() == [c.name for c in WOTLK_MODEL_COLUMNS]
+    assert target.by_name("ModelName").type == "string"
+    assert target.by_name("ModelScale").type == "float"
+
+
+def test_an_array_column_becomes_several_target_fields():
+    columns = [DF.Col("ID", "int", 32, is_id=True),
+               DF.Col("GeoBox", "float", 32, array=6)]
+    text = DF.build_dbd("T", columns, "A1", wotlk_columns=columns)
+    target = layout_from_dbd(parse_definition(text, "T"))
+    assert target.field_count == 7
+    assert target.by_name("GeoBox", 5).index == 6
+    assert target.by_name("GeoBox", 6) is None
+
+
+def test_a_table_that_did_not_exist_in_wrath_has_no_target_layout():
+    text = DF.build_dbd("SpellMisc", MODEL_COLUMNS, "1FE1BDA4")
+    assert layout_from_dbd(parse_definition(text, "SpellMisc")) is None
+
+
+def test_cross_check_reports_a_template_of_a_different_width():
+    target = layout_from_field_count(16)
+    assert cross_check(target, 16, "T") is None
+    assert "16" in cross_check(target, 20, "T")
+
+
+def test_auto_map_matches_same_named_columns_of_the_same_type():
+    text = DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4",
+                        wotlk_columns=WOTLK_MODEL_COLUMNS)
+    definition = parse_definition(text, "CreatureModelData")
+    target = layout_from_dbd(definition)
+    source = definition.by_hash("1FE1BDA4").columns
+    matched = {m.target.name for m in auto_map(target, source, set())}
+    assert {"Flags", "ModelScale", "CollisionHeight", "CollisionWidth",
+            "MountHeight", "SoundID", "ID"} <= matched
+    # A modern int FileDataID and a Wrath string ModelName are the same thing
+    # but need a transform, so they are never matched automatically.
+    assert "ModelName" not in matched
+
+
+def test_auto_map_leaves_claimed_fields_alone():
+    text = DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4",
+                        wotlk_columns=WOTLK_MODEL_COLUMNS)
+    definition = parse_definition(text, "CreatureModelData")
+    target = layout_from_dbd(definition)
+    source = definition.by_hash("1FE1BDA4").columns
+    claimed = {target.by_name("Flags").index}
+    assert "Flags" not in {m.target.name for m in auto_map(target, source, claimed)}
+
+
+# ---------------------------------------------------------------------------
+# Mapping files
+# ---------------------------------------------------------------------------
+def test_builtin_mappings_load_and_describe_only_exceptions():
     library = MappingLibrary()
     assert set(library.tables()) >= {"CreatureDisplayInfo", "CreatureModelData",
                                      "GameObjectDisplayInfo", "ItemDisplayInfo"}
     for name in library.tables():
         mapping = library.get(name)
-        indices = [c.index for c in mapping.columns]
-        assert len(indices) == len(set(indices)), f"{name} maps a field twice"
-        assert max(indices) < mapping.target_field_count
+        assert mapping.columns, f"{name} maps nothing"
         for column in mapping.columns:
+            assert column.target or column.index is not None
             assert column.source or column.const is not None
+        # The layout is derived, not declared, so no field count is carried.
+        assert not mapping.target_field_count
 
 
-def test_a_mapping_that_writes_one_field_twice_is_rejected():
+def test_a_mapping_that_writes_one_target_twice_is_rejected():
     with pytest.raises(ConversionError, match="mapped twice"):
-        TableMapping.from_dict({"table": "T", "target_field_count": 4, "columns": [
-            {"index": 1, "type": "uint", "const": 0},
-            {"index": 1, "type": "uint", "const": 1}]}, "test")
+        TableMapping.from_dict({"table": "T", "columns": [
+            {"target": "A", "type": "uint", "const": 0},
+            {"target": "A", "type": "uint", "const": 1}]}, "test")
 
 
-def test_a_mapping_reaching_past_the_table_is_rejected():
-    with pytest.raises(ConversionError, match="only has 2 fields"):
-        TableMapping.from_dict({"table": "T", "target_field_count": 2, "columns": [
-            {"index": 5, "type": "uint", "const": 0}]}, "test")
+def test_a_column_with_no_target_is_rejected():
+    with pytest.raises(ConversionError, match="neither 'target' nor 'index'"):
+        TableMapping.from_dict({"table": "T", "columns": [
+            {"type": "uint", "const": 0}]}, "test")
 
 
 def test_a_column_with_neither_source_nor_constant_is_rejected():
     with pytest.raises(ConversionError, match="neither"):
-        TableMapping.from_dict({"table": "T", "target_field_count": 2,
-                                "columns": [{"index": 0, "type": "uint"}]}, "t")
+        TableMapping.from_dict({"table": "T", "columns": [
+            {"target": "A", "type": "uint"}]}, "t")
 
 
 def test_an_unknown_field_type_is_rejected():
     with pytest.raises(ConversionError, match="unknown type"):
-        TableMapping.from_dict({"table": "T", "target_field_count": 2, "columns": [
-            {"index": 0, "type": "decimal", "const": 0}]}, "test")
+        TableMapping.from_dict({"table": "T", "columns": [
+            {"target": "A", "type": "decimal", "const": 0}]}, "test")
+
+
+def test_a_target_the_table_does_not_have_names_the_ones_it_does():
+    mapping = TableMapping.from_dict({"table": "T", "columns": [
+        {"target": "Nonexistent", "type": "uint", "from": "X"}]}, "test")
+    target = layout_from_dbd(parse_definition(
+        DF.build_dbd("T", WOTLK_MODEL_COLUMNS, "A1",
+                     wotlk_columns=WOTLK_MODEL_COLUMNS), "T"))
+    with pytest.raises(ConversionError, match="ModelName"):
+        resolve_columns(mapping, target, "test")
+
+
+def test_a_target_name_may_have_alternatives():
+    mapping = TableMapping.from_dict({"table": "T", "columns": [
+        {"target": ["Missing", "ModelName"], "type": "string", "from": "X"}]},
+        "test")
+    target = layout_from_dbd(parse_definition(
+        DF.build_dbd("T", WOTLK_MODEL_COLUMNS, "A1",
+                     wotlk_columns=WOTLK_MODEL_COLUMNS), "T"))
+    resolved = resolve_columns(mapping, target, "test")
+    assert resolved[0].index == target.by_name("ModelName").index
+
+
+def resolved_for(specs, target_columns):
+    """Resolve a throwaway mapping against a throwaway target layout."""
+    mapping = TableMapping.from_dict({"table": "T", "columns": specs}, "test")
+    target = layout_from_dbd(parse_definition(
+        DF.build_dbd("T", target_columns, "A1", wotlk_columns=target_columns),
+        "T"))
+    return resolve_columns(mapping, target, "test"), target
 
 
 def test_transforms_produce_the_spellings_the_client_wants():
     listfile = Listfile()
     listfile.update(["10;creature/bear/bear.m2", "11;creature/bear/skin.blp"])
     ctx = TransformContext(listfile)
-    mapping = TableMapping.from_dict({
-        "table": "T", "target_field_count": 4, "columns": [
-            {"index": 0, "type": "string", "from": "M", "transform": "model_path"},
-            {"index": 1, "type": "string", "from": "T", "transform": "basename"},
-            {"index": 2, "type": "string", "from": "M", "transform": "path"},
-            {"index": 3, "type": "float", "from": "S", "scale": 2.0},
-        ]}, "test")
-    out = apply_row(mapping, {"M": 10, "T": 11, "S": 1.5}, ctx)
+    columns, _target = resolved_for(
+        [{"target": "A", "type": "string", "from": "M", "transform": "model_path"},
+         {"target": "B", "type": "string", "from": "T", "transform": "basename"},
+         {"target": "C", "type": "string", "from": "M", "transform": "path"},
+         {"target": "D", "type": "float", "from": "S", "scale": 2.0}],
+        [DF.Col("A", "string", 32), DF.Col("B", "string", 32),
+         DF.Col("C", "string", 32), DF.Col("D", "float", 32)])
+    out = apply_row(columns, {"M": 10, "T": 11, "S": 1.5}, ctx)
     # DBC model paths take the .mdx spelling; the client swaps it for .m2.
     assert out[0] == ("string", "creature\\bear\\bear.mdx")
     assert out[1] == ("string", "skin")
@@ -425,38 +533,36 @@ def test_transforms_produce_the_spellings_the_client_wants():
 
 def test_unresolved_file_ids_are_recorded():
     ctx = TransformContext(Listfile())
-    mapping = TableMapping.from_dict({
-        "table": "T", "target_field_count": 1, "columns": [
-            {"index": 0, "type": "string", "from": "M", "transform": "path"}]},
-        "test")
-    assert apply_row(mapping, {"M": 4242}, ctx)[0] == ("string", "")
+    columns, _ = resolved_for(
+        [{"target": "A", "type": "string", "from": "M", "transform": "path"}],
+        [DF.Col("A", "string", 32)])
+    assert apply_row(columns, {"M": 4242}, ctx)[0] == ("string", "")
     assert ctx.missing == {4242}
 
 
 def test_first_present_source_wins():
-    mapping = TableMapping.from_dict({
-        "table": "T", "target_field_count": 1, "columns": [
-            {"index": 0, "type": "uint", "from": ["New", "Old"]}]}, "test")
+    columns, _ = resolved_for(
+        [{"target": "A", "type": "uint", "from": ["New", "Old"]}],
+        [DF.Col("A", "int", 32, signed=False)])
     ctx = TransformContext()
-    assert apply_row(mapping, {"Old": 5}, ctx)[0] == ("uint", 5)
-    assert apply_row(mapping, {"New": 9, "Old": 5}, ctx)[0] == ("uint", 9)
+    assert apply_row(columns, {"Old": 5}, ctx)[0][1] == 5
+    assert apply_row(columns, {"New": 9, "Old": 5}, ctx)[0][1] == 9
 
 
 def test_missing_sources_are_listed():
-    mapping = TableMapping.from_dict({
-        "table": "T", "target_field_count": 2, "columns": [
-            {"index": 0, "type": "uint", "from": "Here"},
-            {"index": 1, "type": "uint", "from": "Gone"}]}, "test")
-    assert [c.index for c in missing_sources(mapping, ["Here"])] == [1]
+    columns, _ = resolved_for(
+        [{"target": "A", "type": "uint", "from": "Here"},
+         {"target": "B", "type": "uint", "from": "Gone"}],
+        [DF.Col("A", "int", 32), DF.Col("B", "int", 32)])
+    assert [c.index for c in missing_sources(columns, ["Here"])] == [1]
 
 
 def test_user_mappings_take_precedence(tmp_path):
-    override = {"table": "CreatureModelData", "target_field_count": 3,
-                "verified": True,
-                "columns": [{"index": 0, "type": "uint", "from": "ID"}]}
+    override = {"table": "CreatureModelData",
+                "columns": [{"target": "ID", "type": "uint", "from": "ID"}]}
     (tmp_path / "CreatureModelData.json").write_text(json.dumps(override))
     library = MappingLibrary(tmp_path)
-    assert library.get("CreatureModelData").target_field_count == 3
+    assert len(library.get("CreatureModelData").columns) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -468,17 +574,20 @@ MODEL_COLUMNS = [
     DF.Col("Flags", "int", 32),
     DF.Col("ModelScale", "float", 32),
     DF.Col("CollisionHeight", "float", 32),
-    DF.Col("GeoBoxMin", "float", 32, array=3),
-    DF.Col("GeoBoxMax", "float", 32, array=3),
+    DF.Col("CollisionWidth", "float", 32),
+    DF.Col("MountHeight", "float", 32),
+    DF.Col("SoundID", "int", 32),
 ]
 MODEL_ROWS = [
-    {"ID": 5001, "FileDataID": 1394961, "Flags": 0, "ModelScale": 1.25,
-     "CollisionHeight": 3.0, "GeoBoxMin": [-2.0, -2.0, 0.0],
-     "GeoBoxMax": [2.0, 2.0, 4.0]},
+    {"ID": 5001, "FileDataID": 1394961, "Flags": 2, "ModelScale": 1.25,
+     "CollisionHeight": 3.0, "CollisionWidth": 1.5, "MountHeight": 2.5,
+     "SoundID": 77},
     {"ID": 5002, "FileDataID": 1394970, "Flags": 1, "ModelScale": 0.5,
-     "CollisionHeight": 1.2, "GeoBoxMin": [-1.0, -1.0, 0.0],
-     "GeoBoxMax": [1.0, 1.0, 2.0]},
+     "CollisionHeight": 1.2, "CollisionWidth": 0.8, "MountHeight": 0.0,
+     "SoundID": 0},
 ]
+#: Index of each column in the derived 3.3.5a layout.
+W = {c.name: i for i, c in enumerate(WOTLK_MODEL_COLUMNS)}
 
 
 @pytest.fixture
@@ -491,8 +600,10 @@ def model_listfile():
 
 @pytest.fixture
 def model_db2(defs_dir):
-    index = index_for(defs_dir, "CreatureModelData", MODEL_COLUMNS)
-    return DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS), index
+    (defs_dir / "CreatureModelData.dbd").write_text(
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4",
+                     wotlk_columns=WOTLK_MODEL_COLUMNS))
+    return DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS), DbdIndex(defs_dir)
 
 
 def test_table_name_comes_from_the_path():
@@ -501,72 +612,169 @@ def test_table_name_comes_from_the_path():
     assert table_name_for("/tmp/x/ItemDisplayInfo.db2") == "ItemDisplayInfo"
 
 
-def test_fresh_conversion_writes_the_mapped_fields(model_db2, model_listfile):
+def test_the_layout_is_derived_rather_than_declared(model_db2, model_listfile):
     raw, index = model_db2
     out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
                            model_listfile, index)
     assert res.ok
+    assert res.extra["layout"].startswith("dbd:")
+    assert res.extra["fields"] == len(WOTLK_MODEL_COLUMNS)
+    assert any(n.code == "db2.layout_from_definition" for n in res.notes)
+    assert not any(n.code == "db2.unverified_layout" for n in res.notes)
+
+
+def test_columns_that_kept_their_name_map_themselves(model_db2, model_listfile):
+    raw, index = model_db2
+    out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
+                           model_listfile, index)
     table = DbcTable.parse(out, "o.dbc")
-    assert table.field_count == 28 and len(table) == 2
-    assert table.value(0, 0, "uint") == 5001
-    assert table.value(0, 2, "string") == "creature\\bear\\bear.mdx"
-    assert table.value(0, 4, "float") == pytest.approx(1.25)
-    assert table.value(0, 15, "float") == pytest.approx(3.0)
-    assert table.value(0, 17, "float") == pytest.approx(-2.0)
-    assert table.value(1, 2, "string") == "creature\\wolf\\wolf.mdx"
+    assert table.value(0, W["Flags"], "int") == 2
+    assert table.value(0, W["ModelScale"], "float") == pytest.approx(1.25)
+    assert table.value(0, W["CollisionHeight"], "float") == pytest.approx(3.0)
+    assert table.value(0, W["SoundID"], "int") == 77
+    assert any(n.code == "db2.auto_mapped" for n in res.notes)
+
+
+def test_the_mapping_supplies_the_columns_that_changed(model_db2,
+                                                       model_listfile):
+    raw, index = model_db2
+    out, _res = convert_db2(raw, "CreatureModelData.db2", Options(),
+                            model_listfile, index)
+    table = DbcTable.parse(out, "o.dbc")
+    assert table.value(0, W["ModelName"], "string") == "creature\\bear\\bear.mdx"
+    assert table.value(1, W["ModelName"], "string") == "creature\\wolf\\wolf.mdx"
+
+
+def test_columns_with_no_source_are_reported_not_silently_zeroed(
+        model_db2, model_listfile):
+    raw, index = model_db2
+    _out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
+                            model_listfile, index)
+    note = next(n for n in res.notes if n.code == "db2.columns_unmapped")
+    assert "SizeClass" in note.message and "BloodID" in note.message
+
+
+def test_a_table_with_no_mapping_converts_by_name_alone(defs_dir,
+                                                        model_listfile):
+    columns = [DF.Col("ID", "int", 32, is_id=True), DF.Col("MapID", "int", 32),
+               DF.Col("AreaName", "string", 32)]
+    wotlk = columns + [DF.Col("Extra", "int", 32)]
+    (defs_dir / "AreaTable.dbd").write_text(
+        DF.build_dbd("AreaTable", columns, "ABCD1234", wotlk_columns=wotlk))
+    raw = DF.build_wdc3(columns, [{"ID": 1, "MapID": 0, "AreaName": "Elwynn"}],
+                        layout_hash=0xABCD1234)
+    out, res = convert_db2(raw, "AreaTable.db2", Options(), model_listfile,
+                           DbdIndex(defs_dir))
+    assert res.ok
+    table = DbcTable.parse(out, "o.dbc")
+    assert table.field_count == 4
+    assert table.value(0, 2, "string") == "Elwynn"
+
+
+def test_a_table_absent_from_wrath_is_refused(defs_dir, model_listfile):
+    columns = [DF.Col("ID", "int", 32, is_id=True), DF.Col("V", "int", 32)]
+    (defs_dir / "SpellMisc.dbd").write_text(
+        DF.build_dbd("SpellMisc", columns, "ABCD1234"))
+    raw = DF.build_wdc3(columns, [{"ID": 1, "V": 2}], layout_hash=0xABCD1234)
+    _out, res = convert_db2(raw, "SpellMisc.db2", Options(), model_listfile,
+                            DbdIndex(defs_dir))
+    assert res.status is Status.FAILED
+    message = next(n.message for n in res.notes if n.level == "error")
+    assert "did not exist in Wrath" in message
 
 
 def test_merging_keeps_existing_rows_and_offsets_new_ids(model_db2,
                                                          model_listfile):
     raw, index = model_db2
-    template = DF.build_dbc(28, [
-        [1, 0, "creature\\murloc\\murloc.mdx"] + [0] * 25,
-        [2, 0, "creature\\kobold\\kobold.mdx"] + [0] * 25,
-    ], types=["uint", "uint", "string"] + ["uint"] * 25)
+    width = len(WOTLK_MODEL_COLUMNS)
+    template = DF.build_dbc(width, [
+        [1, 0, "creature\\murloc\\murloc.mdx"] + [0] * (width - 3)],
+        types=["uint", "uint", "string"] + ["uint"] * (width - 3))
     out, res = convert_db2(raw, "CreatureModelData.db2",
                            Options(db_id_offset=100000), model_listfile, index,
                            template_data=template)
-    assert res.ok and res.extra["rows_kept"] == 2 and res.extra["rows_added"] == 2
+    assert res.ok and res.extra["rows_kept"] == 1 and res.extra["rows_added"] == 2
     table = DbcTable.parse(out, "o.dbc")
-    assert len(table) == 4
-    assert table.value(0, 2, "string") == "creature\\murloc\\murloc.mdx"
-    assert table.value(2, 0, "uint") == 105001
-    assert table.value(2, 2, "string") == "creature\\bear\\bear.mdx"
+    assert len(table) == 3
+    assert table.value(0, W["ModelName"], "string") == "creature\\murloc\\murloc.mdx"
+    assert table.value(1, 0, "uint") == 105001
+    assert table.value(1, W["ModelName"], "string") == "creature\\bear\\bear.mdx"
 
 
-def test_a_template_of_the_wrong_width_fails_the_file(model_db2, model_listfile):
+def test_a_template_of_the_wrong_width_fails_the_file(model_db2,
+                                                      model_listfile):
     raw, index = model_db2
     out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
                            model_listfile, index,
-                           template_data=DF.build_dbc(27, [[1] + [0] * 26]))
+                           template_data=DF.build_dbc(3, [[1, 0, 0]]))
     assert res.status is Status.FAILED and out == b""
     message = next(n.message for n in res.notes if n.level == "error")
-    assert "27 fields" in message and "28" in message
+    assert "3" in message and str(len(WOTLK_MODEL_COLUMNS)) in message
 
 
-def test_without_a_template_the_unverified_layout_is_flagged(model_db2,
-                                                             model_listfile):
+def test_a_template_that_agrees_is_confirmed(model_db2, model_listfile):
     raw, index = model_db2
-    _out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
-                            model_listfile, index)
-    assert any(n.code == "db2.unverified_layout" for n in res.notes)
-
-
-def test_a_template_silences_the_layout_warning(model_db2, model_listfile):
-    raw, index = model_db2
+    width = len(WOTLK_MODEL_COLUMNS)
     _out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
                             model_listfile, index,
-                            template_data=DF.build_dbc(28, [[1] + [0] * 27]))
-    codes = {n.code for n in res.notes}
-    assert "db2.unverified_layout" not in codes and "db2.template" in codes
+                            template_data=DF.build_dbc(width, [[1] + [0] * (width - 1)]))
+    assert any(n.code == "db2.template" for n in res.notes)
 
 
-def test_columns_this_build_lacks_are_reported(model_db2, model_listfile):
-    raw, index = model_db2
-    _out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
-                            model_listfile, index)
-    note = next(n for n in res.notes if n.code == "db2.columns_absent")
-    assert "SoundID" in note.message or "BloodID" in note.message
+def test_a_template_alone_cannot_stand_in_for_a_definition(defs_dir,
+                                                           model_listfile):
+    """A .dbc gives the number of columns, never what belongs in them."""
+    (defs_dir / "CreatureModelData.dbd").write_text(
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4"))
+    raw = DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS)
+    out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
+                           model_listfile, DbdIndex(defs_dir),
+                           template_data=DF.build_dbc(12, [[1] + [0] * 11]))
+    assert res.status is Status.FAILED and out == b""
+    message = next(n.message for n in res.notes if n.level == "error")
+    assert "not their names" in message and "DBDefs" in message
+
+
+def test_a_mapping_may_pin_columns_by_index_when_no_definition_covers_wrath(
+        defs_dir, model_listfile, tmp_path):
+    """The escape hatch: name the width and the positions yourself."""
+    (defs_dir / "CreatureModelData.dbd").write_text(
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4"))
+    maps = tmp_path / "maps"
+    maps.mkdir()
+    (maps / "CreatureModelData.json").write_text(json.dumps({
+        "table": "CreatureModelData", "target_field_count": 4,
+        "columns": [
+            {"index": 0, "type": "uint", "from": "ID"},
+            {"index": 2, "type": "string", "from": "FileDataID",
+             "transform": "model_path"},
+            {"index": 3, "type": "float", "from": "ModelScale"}]}))
+    raw = DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS)
+    out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
+                           model_listfile, DbdIndex(defs_dir),
+                           library=MappingLibrary(maps))
+    assert res.ok
+    assert any(n.code == "db2.unverified_layout" for n in res.notes)
+    table = DbcTable.parse(out, "o")
+    assert table.field_count == 4
+    assert table.value(0, 2, "string") == "creature\\bear\\bear.mdx"
+
+
+def test_a_column_mapped_by_name_onto_an_unnamed_layout_says_so(
+        defs_dir, model_listfile, tmp_path):
+    (defs_dir / "CreatureModelData.dbd").write_text(
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4"))
+    maps = tmp_path / "maps"
+    maps.mkdir()
+    (maps / "CreatureModelData.json").write_text(json.dumps({
+        "table": "CreatureModelData", "target_field_count": 4,
+        "columns": [{"target": "ModelName", "type": "string", "from": "ID"}]}))
+    _out, res = convert_db2(DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS),
+                            "CreatureModelData.db2", Options(), model_listfile,
+                            DbdIndex(defs_dir), library=MappingLibrary(maps))
+    assert res.status is Status.FAILED
+    assert 'pin this column with "index"' in next(
+        n.message for n in res.notes if n.level == "error")
 
 
 def test_conversion_without_a_definition_fails_with_advice(model_listfile):
@@ -575,14 +783,6 @@ def test_conversion_without_a_definition_fails_with_advice(model_listfile):
                             model_listfile, None)
     assert res.status is Status.FAILED
     assert "--dbd" in next(n.message for n in res.notes if n.level == "error")
-
-
-def test_a_table_with_no_mapping_says_which_ones_exist(defs_dir,
-                                                       model_listfile):
-    index = index_for(defs_dir, "SpellMisc", MODEL_COLUMNS)
-    raw = DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS)
-    with pytest.raises(MissingDependencyError, match="CreatureModelData"):
-        convert_db2(raw, "SpellMisc.db2", Options(), model_listfile, index)
 
 
 def test_row_selection_by_id(model_db2, model_listfile):
@@ -611,10 +811,12 @@ def test_unresolved_file_ids_are_reported(model_db2):
 
 def test_encrypted_rows_are_reported_by_the_converter(defs_dir,
                                                       model_listfile):
-    index = index_for(defs_dir, "CreatureModelData", MODEL_COLUMNS)
+    (defs_dir / "CreatureModelData.dbd").write_text(
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4",
+                     wotlk_columns=WOTLK_MODEL_COLUMNS))
     raw = DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS, encrypted=True)
     _out, res = convert_db2(raw, "CreatureModelData.db2", Options(),
-                            model_listfile, index)
+                            model_listfile, DbdIndex(defs_dir))
     assert any(n.code == "db2.encrypted" for n in res.notes)
 
 
@@ -634,15 +836,17 @@ def db_cli_tree(tmp_path):
     defs = tmp_path / "definitions"
     defs.mkdir()
     (defs / "CreatureModelData.dbd").write_text(
-        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4"))
+        DF.build_dbd("CreatureModelData", MODEL_COLUMNS, "1FE1BDA4",
+                     wotlk_columns=WOTLK_MODEL_COLUMNS))
     (tmp_path / "CreatureModelData.db2").write_bytes(
         DF.build_wdc3(MODEL_COLUMNS, MODEL_ROWS))
 
     client = tmp_path / "client"
     client.mkdir()
+    width = len(WOTLK_MODEL_COLUMNS)
     (client / "CreatureModelData.dbc").write_bytes(DF.build_dbc(
-        28, [[1, 0, "creature\\murloc\\murloc.mdx"] + [0] * 25],
-        types=["uint", "uint", "string"] + ["uint"] * 25))
+        width, [[1, 0, "creature\\murloc\\murloc.mdx"] + [0] * (width - 3)],
+        types=["uint", "uint", "string"] + ["uint"] * (width - 3)))
 
     (tmp_path / "listfile.csv").write_text(
         "1394961;creature/bear/bear.m2\n1394970;creature/wolf/wolf.m2\n")
@@ -654,14 +858,15 @@ def test_cli_db_tables_lists_the_builtins(capsys):
     assert main(["db", "tables"]) == 0
     out = capsys.readouterr().out
     assert "CreatureModelData" in out and "CreatureDisplayInfo" in out
-    # every built-in is flagged as unchecked against a real client
-    assert "UNVERIFIED" in out
+    # the listing explains that a mapping only covers the exceptions
+    assert "read from its own DBD definition" in out
+    assert "--id-offset applies to ID" in out
 
 
 def test_cli_db_tables_can_show_columns(capsys):
     from wotlkconv.cli import main
     assert main(["db", "tables", "--verbose-columns"]) == 0
-    assert "<- ID" in capsys.readouterr().out
+    assert "<- FileDataID" in capsys.readouterr().out
 
 
 def test_cli_db_convert_merges_onto_the_template(db_cli_tree, tmp_path):

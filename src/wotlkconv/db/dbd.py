@@ -132,6 +132,18 @@ class Definition:
                     return layout
         return None
 
+    def by_field_count(self, inline_columns: int) -> Layout | None:
+        """The layout with exactly this many columns in the record.
+
+        DBDefs lags new builds, so a file's layout hash is often absent. The
+        number of columns the file itself declares is a checkable signal:
+        exactly one layout usually matches, and picking a layout with the wrong
+        column count would mislabel every column after the first difference.
+        """
+        matches = [layout for layout in self.layouts
+                   if len(layout.inline_columns()) == inline_columns]
+        return matches[-1] if len(matches) == 1 else None
+
     def newest(self) -> Layout | None:
         return self.layouts[-1] if self.layouts else None
 

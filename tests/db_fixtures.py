@@ -51,16 +51,8 @@ def _as_words(value: Any, kind: str) -> int:
     return int(value) & 0xFFFFFFFF
 
 
-def build_dbd(table: str, columns: Sequence[Col], layout_hash: str,
-              build: str = "11.0.5.57212") -> str:
-    """A ``.dbd`` definition matching ``columns``."""
-    types = {"int": "int", "float": "float", "string": "string"}
-    lines = ["COLUMNS"]
-    for col in columns:
-        lines.append(f"{types[col.type]} {col.name}")
-    lines.append("")
-    lines.append(f"LAYOUT {layout_hash}")
-    lines.append(f"BUILD {build}")
+def _layout_block(columns: Sequence[Col], layout_hash: str, build: str) -> list[str]:
+    lines = [f"LAYOUT {layout_hash}", f"BUILD {build}"]
     for col in columns:
         if col.non_inline:
             prefix = "$noninline,id$" if col.is_id else "$noninline$"
@@ -73,6 +65,30 @@ def build_dbd(table: str, columns: Sequence[Col], layout_hash: str,
             width = f"<{'' if col.signed else 'u'}{col.bits}>"
         array = f"[{col.array}]" if col.array > 1 else ""
         lines.append(f"{prefix}{col.name}{width}{array}")
+    return lines
+
+
+def build_dbd(table: str, columns: Sequence[Col], layout_hash: str,
+              build: str = "11.0.5.57212",
+              wotlk_columns: Sequence[Col] | None = None,
+              wotlk_build: str = "3.3.5.12340",
+              wotlk_hash: str = "0BADF00D") -> str:
+    """A ``.dbd`` definition matching ``columns``.
+
+    ``wotlk_columns`` adds a second layout for the 3.3.5a build, which is what
+    the converter reads to learn the shape of the table it is writing into.
+    """
+    types = {"int": "int", "float": "float", "string": "string"}
+    named = list(columns) + [c for c in (wotlk_columns or [])
+                             if c.name not in {x.name for x in columns}]
+    lines = ["COLUMNS"]
+    for col in named:
+        lines.append(f"{types[col.type]} {col.name}")
+    lines.append("")
+    lines += _layout_block(columns, layout_hash, build)
+    if wotlk_columns is not None:
+        lines.append("")
+        lines += _layout_block(wotlk_columns, wotlk_hash, wotlk_build)
     return "\n".join(lines) + "\n"
 
 

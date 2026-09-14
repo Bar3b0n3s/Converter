@@ -373,12 +373,23 @@ def parse_db2(data: bytes, name: str = "<db2>",
     if definitions:
         definition = definitions.get(resolved_table)
         if definition is not None:
-            layout = (definition.by_hash(table.layout_hash)
-                      or definition.newest())
-            if layout is not None and not definition.by_hash(table.layout_hash):
-                log.warn(f"{name}: no DBD layout for hash "
-                         f"{table.layout_hash:08X}; using the newest one, so "
-                         f"column names may be off")
+            layout = definition.by_hash(table.layout_hash)
+            if layout is None:
+                # DBDefs lags new builds. Fall back to the layout with the same
+                # number of columns as the file declares, which is checkable;
+                # only guess at the newest when that is ambiguous too.
+                layout = definition.by_field_count(len(storages))
+                if layout is not None:
+                    log.debug(f"{name}: no definition for layout hash "
+                              f"{table.layout_hash:08X}; matched the layout "
+                              f"with {len(storages)} columns instead")
+                else:
+                    layout = definition.newest()
+                    if layout is not None:
+                        log.warn(f"{name}: no definition for layout hash "
+                                 f"{table.layout_hash:08X} and no layout with "
+                                 f"{len(storages)} columns; column names may "
+                                 f"be wrong")
     if layout is not None:
         table.columns = list(layout.columns)
         table.named = True

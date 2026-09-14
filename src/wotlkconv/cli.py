@@ -500,11 +500,17 @@ def cmd_db(args: argparse.Namespace) -> int:
     library = MappingLibrary(getattr(args, "db_mappings", None))
 
     if args.db_command == "tables":
+        if library.tables():
+            print("The 3.3.5a layout of every table is read from its own DBD "
+                  "definition, and columns\nthat kept their name map "
+                  "themselves. A mapping only describes the exceptions:\n")
         for table in library.tables():
             mapping = library.get(table)
-            verified = "verified" if mapping.verified else "UNVERIFIED layout"
-            print(f"{mapping.table:24} {mapping.target_field_count:>3} fields  "
-                  f"{len(mapping.columns):>3} mapped  ({verified})")
+            notes = [f"{len(mapping.columns)} column(s) rewritten"]
+            if mapping.id_offset_columns:
+                notes.append("--id-offset applies to "
+                             + ", ".join(mapping.id_offset_columns))
+            print(f"{mapping.table:24} {'; '.join(notes)}")
             if mapping.description:
                 print(f"    {mapping.description}")
             if args.verbose_columns:
