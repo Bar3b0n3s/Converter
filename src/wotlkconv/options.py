@@ -44,6 +44,12 @@ class Options:
     unresolved: UnresolvedPolicy = UnresolvedPolicy.PLACEHOLDER
     #: Prefix prepended to every resolved in-game path, e.g. "custom\\mypatch".
     path_prefix: str = ""
+    #: Name outputs after the listfile path when the input is named by
+    #: FileDataID (``1234567.m2`` -> ``world/foo/bar.m2``).
+    name_from_listfile: bool = True
+    #: Write every output into the destination root instead of mirroring the
+    #: input's directory structure.
+    flatten: bool = False
 
     # -- textures -------------------------------------------------------
     texture_format: TextureFormat = TextureFormat.AUTO

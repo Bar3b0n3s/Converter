@@ -34,11 +34,21 @@ class ConvertedAsset:
     result: FileResult
 
 
-def _model_stem(source_name: str, model: M2Model) -> str:
+def _model_stem(source_name: str, model: M2Model,
+                output_stem: str | None = None) -> str:
+    """Basename the client will glob companions by.
+
+    3.3.5a derives ``<model>00.skin`` and ``<model><anim>-<sub>.anim`` from the
+    model's *filename*, so the companions have to match whatever the model is
+    written out as -- not the source filename, and not the name stored inside
+    the model.
+    """
+    if output_stem:
+        return output_stem
     stem = os.path.splitext(os.path.basename(source_name))[0]
     if stem.isdigit() and model.name:
-        # The input was named by FileDataID; prefer the model's own name so the
-        # companions get the basename the client will look for.
+        # Input named by FileDataID and no output name given: the model's own
+        # name is a better guess than the numeric one.
         stem = os.path.splitext(os.path.basename(model.name.replace("\\", "/")))[0]
     return stem
 
@@ -120,9 +130,14 @@ def _collect_anims(model: M2Model, stem: str, source: AssetSource | None,
 def convert_m2(data: bytes, source_name: str, opts: Options,
                listfile: Listfile | None = None,
                source: AssetSource | None = None,
-               result: FileResult | None = None
+               result: FileResult | None = None,
+               output_stem: str | None = None
                ) -> tuple[bytes, FileResult, list[ConvertedAsset]]:
-    """Convert one model. Returns (MD20 bytes, result, companion files)."""
+    """Convert one model. Returns (MD20 bytes, result, companion files).
+
+    ``output_stem`` is the basename the model will be written as; companions
+    are named to match it so the client finds them.
+    """
     started = time.time()
     res = result or FileResult(source=source_name, kind="m2")
     res.kind = "m2"
@@ -151,7 +166,7 @@ def convert_m2(data: bytes, source_name: str, opts: Options,
 
     companions: list[ConvertedAsset] = []
     if opts.convert_companions:
-        stem = _model_stem(source_name, model)
+        stem = _model_stem(source_name, model, output_stem)
         companions += _collect_skins(model, stem, source, source_name, opts, res)
         companions += _collect_anims(model, stem, source, opts, res)
 

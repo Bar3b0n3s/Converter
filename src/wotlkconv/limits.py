@@ -132,15 +132,50 @@ BLP_HARD_MAX_DIMENSION = 4096
 WMO_VERSION = 17
 #: Chunks the 3.3.5a root parser knows. Anything else is skipped by the client
 #: at best and mis-parsed at worst, so the converter drops them.
-WMO_ROOT_CHUNKS_KNOWN = {
+WMO_ROOT_CHUNKS_KNOWN = (
     "MVER", "MOHD", "MOTX", "MOMT", "MOGN", "MOGI", "MOSB", "MOPV",
     "MOPT", "MOPR", "MOVV", "MOVB", "MOLT", "MODS", "MODN", "MODD",
     "MFOG", "MCVP",
-}
-WMO_GROUP_CHUNKS_KNOWN = {
+)
+WMO_GROUP_CHUNKS_KNOWN = (
     "MVER", "MOGP", "MOPY", "MOVI", "MOVT", "MONR", "MOTV", "MOBA",
     "MOLR", "MODR", "MOBN", "MOBR", "MOCV", "MLIQ",
-}
+)
+#: SMOMaterial.shader values 3.3.5a implements. Cataclysm and later added
+#: everything above this (two-layer terrain, lod water, parallax and so on).
+WMO_MAX_SHADER = 6
+#: SMOMaterial.blendMode shares M2's blend enum: 0..6.
+WMO_MAX_BLEND_MODE = 6
+#: SMOMaterial.flags bits: unlit, unfogged, unculled, extlight, SIDN, window,
+#: clamp S, clamp T, and one more Blizzard never named.
+WMO_MATERIAL_FLAG_MASK = 0x01FF
+#: MOHD.flags: attenuate-by-portal, unified render path, liquid type from DBC,
+#: do-not-fix-vertex-colour-alpha. Legion reused the upper half for numLod.
+WMO_HEADER_FLAG_MASK = 0x000F
+
+#: MOGP.flags bits 3.3.5a understands. 0x08000000 and above are Legion+.
+WMO_GROUP_FLAG_MASK = 0x07FFFFFF
+WMO_GROUP_FLAG_HAS_VERTEX_COLORS = 0x00000004
+WMO_GROUP_FLAG_HAS_LIGHTS = 0x00000200
+WMO_GROUP_FLAG_HAS_DOODADS = 0x00000800
+WMO_GROUP_FLAG_HAS_WATER = 0x00001000
+WMO_GROUP_FLAG_HAS_TWO_MOCV = 0x01000000
+WMO_GROUP_FLAG_HAS_TWO_MOTV = 0x02000000
+
+#: UV and vertex-colour layers the old renderer can bind.
+WMO_MAX_UV_LAYERS = 2
+WMO_MAX_COLOR_LAYERS = 2
+
+MOHD_SIZE = 64
+MOMT_SIZE = 64
+MOGI_SIZE = 32
+MODD_SIZE = 40
+MODS_SIZE = 32
+MOLT_SIZE = 48
+MFOG_SIZE = 48
+MOGP_HEADER_SIZE = 68
+MOBA_SIZE = 24
+
 #: MOHD.nTextures is a uint32 but the client indexes MOTX by byte offset.
 WMO_MAX_MATERIALS = 0xFFFF
 WMO_MAX_GROUPS = 512

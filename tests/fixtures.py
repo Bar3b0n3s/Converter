@@ -458,3 +458,210 @@ def build_bc5_blp(width: int = 32, height: int = 32) -> bytes:
         blocks += bytes((140, 130, 0, 0, 0, 0, 0, 0))   # green (Y)
     blp = Blp(width, height, 2, 8, PreferredFormat.BC5, 0, [0] * 256, [bytes(blocks)])
     return blp.serialize()
+
+
+# ---------------------------------------------------------------------------
+# WMO
+# ---------------------------------------------------------------------------
+# ADT/WDT/WMO chunk magics are stored byte-reversed on disk.
+WMO_CHUNKS_REVERSED = True
+
+
+def _pad4(blob: bytes) -> bytes:
+    return blob + b"\0" * ((-len(blob)) % 4)
+
+
+def build_modern_wmo_root(*, groups: int = 2, materials: int = 2,
+                          doodads: int = 2, texture_ids=(800001, 800002),
+                          doodad_ids=(810001, 810002), skybox_id: int = 820001,
+                          group_ids=(830001, 830002), num_lod: int = 2) -> bytes:
+    """A BfA-shaped root: FileDataIDs instead of MOTX/MODN/MOSB string tables."""
+    cw = ChunkWriter(reverse=WMO_CHUNKS_REVERSED)
+    cw.add("MVER", struct.pack("<I", 17))
+
+    mohd = bytearray(64)
+    struct.pack_into("<7I", mohd, 0, len(texture_ids), groups, 0, 0, 0, doodads, 1)
+    struct.pack_into("<I", mohd, 28, 0xFF808080)        # ambient colour
+    struct.pack_into("<I", mohd, 32, 1234)              # WMOAreaTable id
+    struct.pack_into("<6f", mohd, 36, -10.0, -10.0, 0.0, 10.0, 10.0, 20.0)
+    # Legion split this uint32 into flags (low) + numLod (high).
+    struct.pack_into("<I", mohd, 60, 0x0002 | (num_lod << 16))
+    cw.add("MOHD", bytes(mohd))
+
+    momt = bytearray(64 * materials)
+    for i in range(materials):
+        base = i * 64
+        struct.pack_into("<3I", momt, base,
+                         0x0004 | 0x8000,    # unculled + a post-Wrath bit
+                         16 if i else 3,     # shader 16 does not exist in 3.3.5a
+                         8 if i else 2)      # blend 8 does not exist either
+        struct.pack_into("<I", momt, base + 12, texture_ids[i % len(texture_ids)])
+        struct.pack_into("<I", momt, base + 24, 0)
+        struct.pack_into("<I", momt, base + 32, 0)
+    cw.add("MOMT", bytes(momt))
+
+    cw.add("MOGN", _pad4(b"".join(f"Group{i}".encode() + b"\0" for i in range(groups))))
+    mogi = bytearray(32 * groups)
+    for i in range(groups):
+        struct.pack_into("<I6fi", mogi, i * 32, 0x8,
+                         -10.0, -10.0, 0.0, 10.0, 10.0, 20.0, 0)
+    cw.add("MOGI", bytes(mogi))
+
+    cw.add("MOSI", struct.pack("<I", skybox_id))
+    cw.add("MOLT", b"")
+    mods = bytearray(32)
+    mods[0:8] = b"Set_$DEF"
+    struct.pack_into("<III", mods, 20, 0, doodads, 0)
+    cw.add("MODS", bytes(mods))
+    cw.add("MODI", struct.pack("<" + "I" * len(doodad_ids), *doodad_ids))
+
+    modd = bytearray(40 * doodads)
+    for i in range(doodads):
+        # nameIndex is an index into MODI here, not a byte offset into MODN.
+        struct.pack_into("<I", modd, i * 40, (i & 0xFFFFFF) | (0x01 << 24))
+        struct.pack_into("<3f", modd, i * 40 + 4, float(i), 0.0, 0.0)
+        struct.pack_into("<4f", modd, i * 40 + 16, 0.0, 0.0, 0.0, 1.0)
+        struct.pack_into("<f", modd, i * 40 + 32, 1.0)
+        struct.pack_into("<I", modd, i * 40 + 36, 0xFFFFFFFF)
+    cw.add("MODD", bytes(modd))
+    cw.add("MFOG", bytes(48))
+    cw.add("GFID", struct.pack("<" + "I" * len(group_ids), *group_ids))
+    cw.add("MOUV", bytes(8 * materials))
+    cw.add("MAVG", bytes(0x30))
+    return cw.getvalue()
+
+
+def build_modern_wmo_group(*, vertices: int = 6, triangles: int = 2,
+                           uv_layers: int = 3, colour_layers: int = 2,
+                           wide_indices: bool = True, wide_polys: bool = True,
+                           big_material: bool = False) -> bytes:
+    """A Shadowlands-shaped group: MOVX indices and MPY2 material references."""
+    inner = ChunkWriter(reverse=WMO_CHUNKS_REVERSED)
+
+    if wide_polys:
+        polys = bytearray()
+        for i in range(triangles):
+            material = 300 if (big_material and i == 0) else i
+            polys += struct.pack("<HH", 0x20, material)
+        inner.add("MPY2", bytes(polys))
+    else:
+        inner.add("MOPY", b"".join(bytes((0x20, i)) for i in range(triangles)))
+
+    index_list = [i % vertices for i in range(triangles * 3)]
+    if wide_indices:
+        inner.add("MOVX", struct.pack("<" + "I" * len(index_list), *index_list))
+    else:
+        inner.add("MOVI", struct.pack("<" + "H" * len(index_list), *index_list))
+
+    verts = b"".join(struct.pack("<3f", float(i), float(i % 3), float(i % 5))
+                     for i in range(vertices))
+    inner.add("MOVT", verts)
+    inner.add("MONR", b"".join(struct.pack("<3f", 0.0, 0.0, 1.0) for _ in range(vertices)))
+    for _ in range(uv_layers):
+        inner.add("MOTV", b"".join(struct.pack("<2f", 0.0, 0.0) for _ in range(vertices)))
+
+    moba = bytearray(24)
+    struct.pack_into("<6h", moba, 0, 0, 0, 0, 0, 0, 0)   # deliberately empty box
+    struct.pack_into("<IHHH", moba, 12, 0, triangles * 3, 0, vertices - 1)
+    moba[22] = 0
+    moba[23] = 0
+    inner.add("MOBA", bytes(moba))
+
+    for _ in range(colour_layers):
+        inner.add("MOCV", bytes(4 * vertices))
+    inner.add("MOBS", bytes(24))
+    inner.add("MOLS", bytes(56))
+
+    header = bytearray(68)
+    struct.pack_into("<II", header, 0, 0, 0)
+    # 0x08000000 is a post-Wrath bit; 0x02000000/0x01000000 claim two UV/colour
+    # layers, which the converter must re-derive after dropping the extras.
+    struct.pack_into("<I", header, 8, 0x8 | 0x4 | 0x02000000 | 0x08000000)
+    struct.pack_into("<6f", header, 12, -10.0, -10.0, 0.0, 10.0, 10.0, 20.0)
+    struct.pack_into("<6H", header, 0x24, 0, 0, 0, 1, 0, 0)
+    struct.pack_into("<I", header, 0x34, 0xFFFFFFFF)
+    struct.pack_into("<I", header, 0x38, 1234)
+    struct.pack_into("<II", header, 0x3C, 0x1, 0xFFFFFFFF)  # flags2 + split index
+
+    outer = ChunkWriter(reverse=WMO_CHUNKS_REVERSED)
+    outer.add("MVER", struct.pack("<I", 17))
+    outer.add("MOGP", bytes(header) + inner.getvalue())
+    return outer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# ADT
+# ---------------------------------------------------------------------------
+def build_split_adt(*, chunks: int = 4, layers: int = 2,
+                    texture_ids=(700001, 700002), doodad_refs: int = 3,
+                    object_refs: int = 2, high_res_holes: bool = True
+                    ) -> tuple[bytes, bytes, bytes]:
+    """A Cataclysm-style split tile: (root, tex0, obj0)."""
+    rev = WMO_CHUNKS_REVERSED
+
+    # -- root -----------------------------------------------------------
+    root = ChunkWriter(reverse=rev)
+    root.add("MVER", struct.pack("<I", 18))
+    mhdr = bytearray(64)
+    struct.pack_into("<I", mhdr, 0, 0x1)   # has MFBO
+    root.add("MHDR", bytes(mhdr))
+    root.add("MH2O", b"")
+
+    for i in range(chunks):
+        hdr = bytearray(128)
+        flags = 0x0
+        if high_res_holes:
+            flags |= 0x10000
+            # 8x8 mask: punch the top-left 2x2 high-res quadrant only.
+            hdr[0x40] = 0b00000011
+            hdr[0x41] = 0b00000011
+        struct.pack_into("<I", hdr, 0, flags)
+        struct.pack_into("<II", hdr, 4, i % 16, i // 16)
+        struct.pack_into("<I", hdr, 0x34, 1519)                  # area id
+        struct.pack_into("<3f", hdr, 0x68, float(i), 0.0, 0.0)   # position
+        inner = ChunkWriter(reverse=rev)
+        inner.add("MCVT", b"".join(struct.pack("<f", float(n % 7)) for n in range(145)))
+        inner.add("MCCV", bytes(145 * 4))
+        inner.add("MCNR", bytes(448))
+        inner.add("MCLV", bytes(145 * 4))     # Cataclysm-only, must be dropped
+        inner.add("MCSE", bytes(28 * 2))
+        root.add("MCNK", bytes(hdr) + inner.getvalue())
+    root.add("MFBO", bytes(36))
+
+    # -- tex0 -----------------------------------------------------------
+    tex = ChunkWriter(reverse=rev)
+    tex.add("MVER", struct.pack("<I", 18))
+    tex.add("MDID", struct.pack("<" + "I" * len(texture_ids), *texture_ids))
+    tex.add("MHID", struct.pack("<" + "I" * len(texture_ids), *([0] * len(texture_ids))))
+    tex.add("MTXP", bytes(16 * len(texture_ids)))
+    for _ in range(chunks):
+        inner = ChunkWriter(reverse=rev)
+        mcly = bytearray()
+        for layer in range(layers):
+            # textureId, flags, offsetInMCAL, effectId
+            mcly += struct.pack("<IIIi", layer % len(texture_ids), 0x100 if layer else 0,
+                                0 if layer == 0 else 2048 * (layer - 1), -1)
+        inner.add("MCLY", bytes(mcly))
+        inner.add("MCSH", bytes(512))
+        inner.add("MCAL", bytes(2048 * max(0, layers - 1)))
+        inner.add("MCMT", bytes(layers))   # Cataclysm-only
+        tex.add("MCNK", inner.getvalue())
+
+    # -- obj0 -----------------------------------------------------------
+    obj = ChunkWriter(reverse=rev)
+    obj.add("MVER", struct.pack("<I", 18))
+    obj.add("MMDX", b"world\\doodad\\tree.m2\0")
+    obj.add("MMID", struct.pack("<I", 0))
+    obj.add("MWMO", b"world\\wmo\\house.wmo\0")
+    obj.add("MWID", struct.pack("<I", 0))
+    obj.add("MDDF", bytes(36))
+    obj.add("MODF", bytes(64))
+    for _ in range(chunks):
+        inner = ChunkWriter(reverse=rev)
+        inner.add("MCRD", struct.pack("<" + "I" * doodad_refs,
+                                      *range(doodad_refs)))
+        inner.add("MCRW", struct.pack("<" + "I" * object_refs,
+                                      *range(object_refs)))
+        obj.add("MCNK", inner.getvalue())
+
+    return root.getvalue(), tex.getvalue(), obj.getvalue()
