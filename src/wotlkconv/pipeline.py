@@ -23,6 +23,7 @@ from typing import Iterable, Sequence
 from . import detect, log
 from .adt import AdtParts, convert_adt, convert_wdt
 from .blp import convert_blp
+from .db import DbdIndex, MappingLibrary, convert_db2, find_template
 from .errors import ConverterError
 from .listfile import Listfile, to_posix
 from .m2 import convert_anim, convert_m2, convert_skin
@@ -126,8 +127,9 @@ def _companion_names(kind: str, path: Path) -> set[str]:
 
 
 def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
-         claim_companions: bool = True,
-         copy_unconverted: bool = True) -> tuple[list[Job], list[FileResult]]:
+         claim_companions: bool = True, copy_unconverted: bool = True,
+         convert_databases: bool = False
+         ) -> tuple[list[Job], list[FileResult]]:
     """Classify inputs into jobs, grouping split terrain tiles.
 
     With ``claim_companions``, files that another job will pull in and rename
@@ -174,7 +176,7 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
                 adt_roots[key] = Path(root)
             continue
 
-        action, reason = detect.classify(kind, str(path))
+        action, reason = detect.classify(kind, str(path), convert_databases)
         if action == detect.COPY and not copy_unconverted:
             action, reason = detect.SKIP, (
                 "3.3.5a reads this format unchanged, but --no-copy-unconverted "
@@ -219,8 +221,8 @@ def plan(inputs: Sequence[str | os.PathLike[str]], recursive: bool = True,
 def plan_casc(storage, listfile: Listfile, *, include: Sequence[str] = (),
               file_ids: Sequence[int] = (),
               exclude: Sequence[str] = (),
-              claim_companions: bool = True,
-              copy_unconverted: bool = True
+              claim_companions: bool = True, copy_unconverted: bool = True,
+              convert_databases: bool = False
               ) -> tuple[list[Job], list[FileResult]]:
     """Choose files to pull out of a CASC install.
 
@@ -285,7 +287,7 @@ def plan_casc(storage, listfile: Listfile, *, include: Sequence[str] = (),
             # No listfile entry: name it by FileDataID and detected type so it
             # still lands somewhere predictable.
             path = f"unknown\\{file_id}{detect.EXTENSIONS.get(kind, '.bin')}"
-        action, reason = detect.classify(kind, path)
+        action, reason = detect.classify(kind, path, convert_databases)
         if action == detect.COPY and not copy_unconverted:
             action, reason = detect.SKIP, (
                 "3.3.5a reads this format unchanged, but --no-copy-unconverted "
@@ -339,12 +341,16 @@ class Converter:
     """Runs jobs and decides where their outputs land."""
 
     def __init__(self, opts: Options, listfile: Listfile,
-                 out_dir: Path, source: AssetSource, storage=None):
+                 out_dir: Path, source: AssetSource, storage=None,
+                 definitions: DbdIndex | None = None,
+                 mappings: MappingLibrary | None = None):
         self.opts = opts
         self.listfile = listfile
         self.out_dir = Path(out_dir)
         self.source = source
         self.storage = storage
+        self.definitions = definitions or DbdIndex(None)
+        self.mappings = mappings or MappingLibrary(opts.db_mappings or None)
 
     # -- naming ---------------------------------------------------------
     def output_path(self, job: Job) -> Path:
@@ -454,6 +460,17 @@ class Converter:
             out, result = convert_group(data, job.relpath, opts, result)
             return [Output(target, out, result)]
 
+        if kind == detect.DB2:
+            from .db.convert import table_name_for
+
+            table = table_name_for(job.relpath)
+            template = find_template(opts.db_templates, table)
+            out, result = convert_db2(data, job.relpath, opts, self.listfile,
+                                      self.definitions, self.mappings,
+                                      template, table, result)
+            # 3.3.5a reads .dbc, so the output changes extension.
+            return [Output(target.with_suffix(".dbc"), out, result)]
+
         if kind == detect.WDT:
             out, result = convert_wdt(data, job.relpath, opts, result)
             return [Output(target, out, result)]
@@ -504,7 +521,8 @@ _WORKER: dict[str, object] = {}
 
 
 def _worker_init(opts: Options, listfile_path: str | None, roots: list[str],
-                 out_dir: str, casc: dict | None) -> None:  # pragma: no cover
+                 out_dir: str, casc: dict | None,
+                 dbd_dir: str | None = None) -> None:  # pragma: no cover
     lf = Listfile.load(listfile_path) if listfile_path else Listfile()
     storage = None
     if casc:
@@ -514,7 +532,8 @@ def _worker_init(opts: Options, listfile_path: str | None, roots: list[str],
         storage = CascStorage.open(casc["path"], product=casc.get("product"),
                                    locale=casc.get("locale", "enus"), keys=keys)
     source = AssetSource(lf, roots=roots, casc=storage)
-    _WORKER["converter"] = Converter(opts, lf, Path(out_dir), source, storage)
+    _WORKER["converter"] = Converter(opts, lf, Path(out_dir), source, storage,
+                                     DbdIndex(dbd_dir) if dbd_dir else None)
 
 
 def _worker_run(job: Job) -> list[Output]:  # pragma: no cover
@@ -529,7 +548,8 @@ def run(jobs: Sequence[Job], opts: Options, listfile: Listfile,
         out_dir: str | os.PathLike[str], roots: Sequence[str] = (),
         listfile_path: str | None = None,
         skipped: Sequence[FileResult] = (),
-        storage=None, casc_args: dict | None = None) -> Report:
+        storage=None, casc_args: dict | None = None,
+        definitions: DbdIndex | None = None) -> Report:
     """Convert every job, in parallel when asked, and collect the results."""
     report = Report()
     report.extend(skipped)
@@ -540,7 +560,9 @@ def run(jobs: Sequence[Job], opts: Options, listfile: Listfile,
             with ProcessPoolExecutor(
                     max_workers=opts.jobs, initializer=_worker_init,
                     initargs=(opts, listfile_path, list(roots), str(out_dir),
-                              casc_args)
+                              casc_args,
+                              str(definitions.directory)
+                              if definitions and definitions.directory else None)
             ) as pool:
                 for outputs in pool.map(_worker_run, jobs):
                     for out in outputs:
@@ -551,7 +573,7 @@ def run(jobs: Sequence[Job], opts: Options, listfile: Listfile,
             log.warn(f"parallel execution unavailable ({exc}); running serially")
 
     source = AssetSource(listfile, roots=list(roots), casc=storage)
-    converter = Converter(opts, listfile, out_dir, source, storage)
+    converter = Converter(opts, listfile, out_dir, source, storage, definitions)
     for job in jobs:
         log.debug(f"converting {job.describe()}")
         outputs = converter.convert(job)

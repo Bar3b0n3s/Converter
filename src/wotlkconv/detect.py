@@ -20,6 +20,8 @@ WMO_ROOT = "wmo"
 WMO_GROUP = "wmo-group"
 ADT = "adt"
 WDT = "wdt"
+DB2 = "db2"
+DBC = "dbc"
 UNKNOWN = "unknown"
 
 # What to do with a file, once its kind is known.
@@ -27,7 +29,9 @@ CONVERT = "convert"   # needs a structural downgrade
 COPY = "copy"         # 3.3.5a reads it unchanged; copy it into the patch
 SKIP = "skip"         # cannot be used by 3.3.5a, or is handled elsewhere
 
-#: Kinds this tool converts.
+#: Kinds this tool converts. Client databases are handled separately: they
+#: need a definition, a mapping and usually the user's own table as a template,
+#: so they only join a `convert` run once --dbd is supplied.
 CONVERTIBLE = {M2, SKIN, ANIM, BLP, WMO_ROOT, WMO_GROUP, ADT, WDT}
 
 #: Extensions the 3.3.5a client reads as-is. A patch archive needs these just
@@ -44,8 +48,8 @@ COPY_EXTENSIONS = {
 #: Extensions that exist in modern builds but cannot be used by 3.3.5a, with
 #: the reason, so the report says why rather than "unrecognised".
 UNSUPPORTED_EXTENSIONS = {
-    ".db2": "client databases; 3.3.5a reads .dbc, and converting between them "
-            "needs per-table schemas this tool does not carry",
+    ".db2": "client database; convert it with 'wotlkconv db convert', or pass "
+            "--dbd to a convert run so the tables with mappings come along",
     ".tex": "Legion streamed high-resolution texture payloads; 3.3.5a loads "
             "whole BLPs instead",
     ".phys": "physics rigs; 3.3.5a has no model physics",
@@ -62,6 +66,7 @@ UNSUPPORTED_EXTENSIONS = {
 EXTENSIONS = {
     M2: ".m2", SKIN: ".skin", ANIM: ".anim", SKEL: ".skel", BLP: ".blp",
     WMO_ROOT: ".wmo", WMO_GROUP: ".wmo", ADT: ".adt", WDT: ".wdt",
+    DB2: ".db2", DBC: ".dbc",
 }
 
 #: Extensions that name a Cataclysm-and-later split terrain file.
@@ -98,6 +103,10 @@ def detect(data: bytes, path: str = "") -> str:
         return ANIM
     if head in (b"SKL1", b"SKB1", b"SKA1"):
         return SKEL
+    if head == b"WDBC":
+        return DBC
+    if head[:3] in (b"WDC", b"WDB") and head[3:4].isalnum():
+        return DB2
 
     names = _chunk_names(data)
     if names:
@@ -123,7 +132,8 @@ def detect(data: bytes, path: str = "") -> str:
     return UNKNOWN
 
 
-def classify(kind: str, path: str = "") -> tuple[str, str]:
+def classify(kind: str, path: str = "",
+             convert_databases: bool = False) -> tuple[str, str]:
     """Decide what to do with a file, returning ``(action, reason)``.
 
     Kinds this tool understands are converted. Everything else is judged on its
@@ -134,6 +144,12 @@ def classify(kind: str, path: str = "") -> tuple[str, str]:
     if kind == SKEL:
         return SKIP, ("skeletons are merged into the model that references "
                       "them, not converted on their own")
+    if kind == DB2:
+        if convert_databases:
+            return CONVERT, ""
+        return SKIP, UNSUPPORTED_EXTENSIONS[".db2"]
+    if kind == DBC:
+        return COPY, "already a 3.3.5a client database"
     if kind in CONVERTIBLE:
         return CONVERT, ""
 

@@ -279,9 +279,15 @@ def test_copied_files_arrive_byte_for_byte(mixed_tree, tmp_path):
 def test_unusable_formats_are_skipped_with_a_specific_reason(mixed_tree):
     _jobs, skipped = plan([mixed_tree])
     reasons = {Path(s.source).name: s.notes[0].message for s in skipped}
-    assert ".dbc" in reasons["db.db2"]
+    assert "wotlkconv db convert" in reasons["db.db2"]
     assert "high-resolution" in reasons["hd.tex"]
     assert "merged into the model" in reasons["rig.skel"]
+
+
+def test_databases_join_a_run_once_definitions_are_available(mixed_tree):
+    jobs, skipped = plan([mixed_tree], convert_databases=True)
+    assert detect.DB2 in {j.kind for j in jobs}
+    assert "db.db2" not in {Path(s.source).name for s in skipped}
 
 
 def test_copying_can_be_turned_off(mixed_tree):
@@ -353,7 +359,7 @@ def test_casc_selection_groups_and_claims_like_the_disk_planner(casc_install):
         # The tile's three pieces became one job.
         adt = next(j for j in jobs if j.kind == detect.ADT)
         assert sorted(adt.extra_ids) == ["obj0", "tex0"]
-        assert any(".dbc" in s.notes[0].message for s in skipped)
+        assert any("db convert" in s.notes[0].message for s in skipped)
 
 
 def test_casc_convert_produces_the_client_layout(casc_install, tmp_path):

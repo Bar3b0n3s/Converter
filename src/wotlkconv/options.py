@@ -75,6 +75,21 @@ class Options:
     #: Also write the converted .skin / .anim companions next to the model.
     convert_companions: bool = True
 
+    # -- client databases -------------------------------------------------
+    #: Directory of user mapping JSON files, taking precedence over built-ins.
+    db_mappings: str = ""
+    #: Directory searched for ``<Table>.dbc`` templates.
+    db_templates: str = ""
+    #: Append to the template's rows rather than starting a fresh table.
+    db_merge: bool = True
+    #: Added to converted row ids (and to references marked ``id_offset``) so
+    #: they do not collide with the ids the client already has.
+    db_id_offset: int = 0
+    #: Only convert these row ids; empty means every row.
+    db_row_ids: tuple[int, ...] = ()
+    #: ``(column, value)`` filters a row must match to be converted.
+    db_where: tuple[tuple[str, str], ...] = ()
+
     # -- world ----------------------------------------------------------
     #: Merge Cataclysm+ split ADTs (_obj0/_tex0) back into one monolithic file.
     merge_split_adt: bool = True

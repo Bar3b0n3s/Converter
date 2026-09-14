@@ -6,6 +6,7 @@
     wotlkconv plan IN...             list what a convert run would do
     wotlkconv listfile PATH          sanity-check a community listfile
     wotlkconv casc info|list|extract read a game install directly
+    wotlkconv db convert|tables      turn client databases into 3.3.5a .dbc
 """
 
 from __future__ import annotations
@@ -20,12 +21,16 @@ from . import __version__, detect, log
 from .adt import inspect_adt, inspect_wdt
 from .blp import inspect_blp
 from .casc import CascStorage, KeyRing
+from .db import DbdIndex, MappingLibrary, convert_db2, find_template, table_name_for
+from .db.dbc import inspect_dbc
+from .db.dbd import ENV_VAR as dbd_env
 from .errors import ConverterError
-from .listfile import ENV_VAR, Listfile, to_posix
 from .limits import BLP_SOFT_MAX_DIMENSION, TARGET_BUILD, TARGET_PATCH
+from .listfile import ENV_VAR, Listfile, to_posix
 from .m2 import inspect_anim, inspect_m2, inspect_skin
 from .options import Options, TextureFormat, UnresolvedPolicy
 from .pipeline import normalise_pattern, plan, plan_casc, run
+from .report import FileResult, Report
 from .wmo import inspect_group, inspect_wmo_root
 
 _INSPECTORS = {
@@ -37,6 +42,7 @@ _INSPECTORS = {
     detect.WMO_GROUP: inspect_group,
     detect.ADT: inspect_adt,
     detect.WDT: inspect_wdt,
+    detect.DBC: inspect_dbc,
 }
 
 
@@ -89,10 +95,30 @@ examples:
                     help="TACT encryption keys (a WoW.txt of "
                          "'<keyname> <key>' lines) for encrypted files")
 
+    db_opts = argparse.ArgumentParser(add_help=False)
+    dg = db_opts.add_argument_group("client databases")
+    dg.add_argument("--dbd", metavar="DIR",
+                    help="the 'definitions' folder of a WoWDBDefs checkout; "
+                         "without it a .db2's columns have no names and cannot "
+                         f"be mapped (or set ${dbd_env})")
+    dg.add_argument("--db-mappings", metavar="DIR",
+                    help="directory of mapping JSON files, taking precedence "
+                         "over the built-in ones")
+    dg.add_argument("--template-dir", metavar="DIR",
+                    help="directory holding your client's .dbc files; each "
+                         "table's own file is used to verify the layout and to "
+                         "merge new rows onto")
+    dg.add_argument("--id-offset", type=int, default=0, metavar="N",
+                    help="add N to converted row ids so they do not collide "
+                         "with the ids your client already has")
+    dg.add_argument("--no-merge", action="store_true",
+                    help="write a fresh table instead of appending to the "
+                         "template's rows")
+
     sub = parser.add_subparsers(dest="command", required=True)
 
     # -- convert --------------------------------------------------------
-    conv = sub.add_parser("convert", parents=[common, casc_opts],
+    conv = sub.add_parser("convert", parents=[common, casc_opts, db_opts],
                           help="downgrade assets for 3.3.5a")
     conv.add_argument("inputs", nargs="*", metavar="IN",
                       help="files or directories to convert; omit when reading "
@@ -213,6 +239,32 @@ examples:
     ce.add_argument("-l", "--listfile", metavar="PATH")
     ce.add_argument("-f", "--overwrite", action="store_true")
 
+    # -- db -------------------------------------------------------------
+    db = sub.add_parser("db", parents=[common],
+                        help="convert client databases to 3.3.5a .dbc")
+    db_sub = db.add_subparsers(dest="db_command", required=True)
+    dc = db_sub.add_parser("convert", parents=[common, db_opts],
+                           help="convert .db2 files into .dbc")
+    dc.add_argument("inputs", nargs="+", metavar="FILE")
+    dc.add_argument("-o", "--out", required=True, metavar="DIR")
+    dc.add_argument("-l", "--listfile", metavar="PATH")
+    dc.add_argument("--template", metavar="PATH",
+                    help="this table's .dbc from your client; overrides "
+                         "--template-dir for a single file")
+    dc.add_argument("--table", metavar="NAME",
+                    help="table name, when the filename does not carry it")
+    dc.add_argument("--only-id", action="append", default=[], type=int,
+                    metavar="ID", help="convert only these row ids; repeatable")
+    dc.add_argument("--where", action="append", default=[], metavar="COL=VALUE",
+                    help="convert only rows whose column matches; repeatable")
+    dc.add_argument("-f", "--overwrite", action="store_true")
+    dc.add_argument("--report", metavar="PATH")
+    dt = db_sub.add_parser("tables", parents=[common],
+                           help="list the tables that have a mapping")
+    dt.add_argument("--db-mappings", metavar="DIR")
+    dt.add_argument("--verbose-columns", action="store_true",
+                    help="also print each mapping's columns")
+
     # -- listfile -------------------------------------------------------
     lf = sub.add_parser("listfile", parents=[common],
                         help="sanity-check a community listfile")
@@ -256,6 +308,10 @@ def _options_from(args: argparse.Namespace) -> Options:
         convert_companions=not args.no_companions,
         merge_split_adt=not args.no_merge_adt,
         copy_unconverted=not args.no_copy_unconverted,
+        db_mappings=getattr(args, "db_mappings", "") or "",
+        db_templates=getattr(args, "template_dir", "") or "",
+        db_merge=not getattr(args, "no_merge", False),
+        db_id_offset=getattr(args, "id_offset", 0) or 0,
     )
 
 
@@ -304,6 +360,13 @@ def cmd_convert(args: argparse.Namespace) -> int:
                   "game install directly")
         return 1
 
+    definitions = DbdIndex.discover(args.dbd, search_dirs) if args.dbd \
+        else DbdIndex.discover(None, search_dirs)
+    convert_databases = bool(definitions)
+    if args.dbd and not definitions:
+        log.error(f"no .dbd definitions found in {args.dbd}")
+        return 1
+
     jobs = []
     skipped = []
     storage = None
@@ -325,14 +388,16 @@ def cmd_convert(args: argparse.Namespace) -> int:
         cjobs, cskipped = plan_casc(
             storage, listfile, include=includes, file_ids=args.fileid,
             exclude=args.exclude, claim_companions=not args.no_companions,
-            copy_unconverted=not args.no_copy_unconverted)
+            copy_unconverted=not args.no_copy_unconverted,
+            convert_databases=convert_databases)
         jobs += cjobs
         skipped += cskipped
 
     if args.inputs:
         fjobs, fskipped = plan(args.inputs, recursive=not args.no_recursive,
                                claim_companions=not args.no_companions,
-                               copy_unconverted=not args.no_copy_unconverted)
+                               copy_unconverted=not args.no_copy_unconverted,
+                               convert_databases=convert_databases)
         jobs += fjobs
         skipped += fskipped
 
@@ -349,7 +414,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
     report = run(jobs, opts, listfile, args.out, roots=roots,
                  listfile_path=listfile.source if listfile else None,
-                 skipped=skipped, storage=storage, casc_args=casc_args)
+                 skipped=skipped, storage=storage, casc_args=casc_args,
+                 definitions=definitions)
     if storage is not None:
         storage.close()
 
@@ -417,6 +483,91 @@ def cmd_plan(args: argparse.Namespace) -> int:
     total = ", ".join(f"{n} {k}" for k, n in sorted(by_kind.items()))
     print(f"{len(jobs)} job(s): {total}" if jobs else "nothing to convert")
     return 0
+
+
+def cmd_db(args: argparse.Namespace) -> int:
+    library = MappingLibrary(getattr(args, "db_mappings", None))
+
+    if args.db_command == "tables":
+        for table in library.tables():
+            mapping = library.get(table)
+            verified = "verified" if mapping.verified else "UNVERIFIED layout"
+            print(f"{mapping.table:24} {mapping.target_field_count:>3} fields  "
+                  f"{len(mapping.columns):>3} mapped  ({verified})")
+            if mapping.description:
+                print(f"    {mapping.description}")
+            if args.verbose_columns:
+                for column in mapping.columns:
+                    suffix = f"  -- {column.note}" if column.note else ""
+                    print(f"    {column.describe()}{suffix}")
+        if not library.tables():
+            print("no mappings found")
+        return 0
+
+    opts = Options(
+        db_mappings=getattr(args, "db_mappings", "") or "",
+        db_templates=getattr(args, "template_dir", "") or "",
+        db_merge=not args.no_merge,
+        db_id_offset=args.id_offset,
+        db_row_ids=tuple(args.only_id),
+        db_where=tuple(_parse_where(args.where)),
+        overwrite=args.overwrite,
+    )
+    listfile = Listfile.discover(args.listfile, [])
+    definitions = DbdIndex.discover(args.dbd, [])
+    if not definitions:
+        log.error("client databases need column names: pass --dbd pointing at "
+                  "the 'definitions' folder of a WoWDBDefs checkout "
+                  f"(or set ${dbd_env})")
+        return 1
+
+    out_dir = Path(args.out)
+    report = Report()
+    for raw_path in args.inputs:
+        path = Path(raw_path)
+        table = args.table or table_name_for(str(path))
+        template = None
+        if args.template:
+            template = Path(args.template).read_bytes()
+        elif args.template_dir:
+            template = find_template(args.template_dir, table)
+        result = FileResult(source=str(path), kind="db2")
+        try:
+            data, result = convert_db2(path.read_bytes(), str(path), opts,
+                                       listfile, definitions, library,
+                                       template, table, result)
+        except ConverterError as exc:
+            result.fail("db2.error", str(exc))
+            data = b""
+        except OSError as exc:
+            result.fail("io.read", str(exc))
+            data = b""
+        report.add(result)
+        if data and result.ok:
+            target = out_dir / f"{table}.dbc"
+            result.target = str(target)
+            if target.exists() and not args.overwrite:
+                result.warn("io.exists",
+                            f"{target} already exists; pass --overwrite")
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+    report.close()
+    for line in report.summary_lines(verbose=args.verbose >= 1):
+        print(line)
+    if args.report:
+        report.write_json(args.report)
+    return 1 if report.failed else 0
+
+
+def _parse_where(entries) -> list[tuple[str, str]]:
+    out = []
+    for entry in entries:
+        column, _, value = entry.partition("=")
+        if not column or not _:
+            raise ConverterError(f"--where wants COLUMN=VALUE, got {entry!r}")
+        out.append((column.strip(), value.strip()))
+    return out
 
 
 def cmd_casc(args: argparse.Namespace) -> int:
@@ -527,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
         "plan": cmd_plan,
         "listfile": cmd_listfile,
         "casc": cmd_casc,
+        "db": cmd_db,
     }
     try:
         return handlers[args.command](args)

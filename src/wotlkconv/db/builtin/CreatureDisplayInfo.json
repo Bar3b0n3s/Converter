@@ -1,0 +1,32 @@
+{
+  "table": "CreatureDisplayInfo",
+  "description": "Links a display id to a model, its scale and its texture variations. This is the row a creature's display_id in the server database points at.",
+  "target_field_count": 16,
+  "id_index": 0,
+  "verified": false,
+  "columns": [
+    {"index": 0,  "type": "uint",   "from": "ID", "id_offset": true},
+    {"index": 1,  "type": "uint",   "from": "ModelID", "id_offset": true,
+     "note": "references CreatureModelData.ID"},
+    {"index": 2,  "type": "uint",   "from": "SoundID", "default": 0,
+     "note": "CreatureSoundData id; modern ids will not exist in 3.3.5a"},
+    {"index": 3,  "type": "uint",   "from": "ExtendedDisplayInfoID", "default": 0},
+    {"index": 4,  "type": "float",  "from": ["CreatureModelScale", "ModelScale"],
+     "default": 1.0},
+    {"index": 5,  "type": "uint",   "from": "CreatureModelAlpha", "default": 255},
+    {"index": 6,  "type": "string", "from": "TextureVariationFileDataID",
+     "array_index": 0, "transform": "basename"},
+    {"index": 7,  "type": "string", "from": "TextureVariationFileDataID",
+     "array_index": 1, "transform": "basename"},
+    {"index": 8,  "type": "string", "from": "TextureVariationFileDataID",
+     "array_index": 2, "transform": "basename"},
+    {"index": 9,  "type": "string", "from": "PortraitTextureFileDataID",
+     "transform": "basename"},
+    {"index": 10, "type": "uint",   "const": 0, "note": "BloodLevel"},
+    {"index": 11, "type": "uint",   "from": "BloodID", "default": 0},
+    {"index": 12, "type": "uint",   "from": "NPCSoundID", "default": 0},
+    {"index": 13, "type": "uint",   "from": "ParticleColorID", "default": 0},
+    {"index": 14, "type": "uint",   "const": 0, "note": "CreatureGeosetData"},
+    {"index": 15, "type": "uint",   "from": "ObjectEffectPackageID", "default": 0}
+  ]
+}
