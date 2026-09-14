@@ -410,7 +410,8 @@ def strip_optional(model: M2Model, opts: Options, result: FileResult) -> None:
 
 
 def report_dropped_chunks(model: M2Model, result: FileResult) -> None:
-    dropped = []
+    dropped: list[str] = []
+    unknown: list[str] = []
     for name, size in sorted(model.extra_chunks.items()):
         if name == "SFID.lod":
             if size:
@@ -419,13 +420,25 @@ def report_dropped_chunks(model: M2Model, result: FileResult) -> None:
                             f"3.3.5a only loads Model00-03.skin", count=size)
             continue
         why = NOTABLE_DROPPED_CHUNKS.get(name)
-        dropped.append(f"{name} ({why})" if why else name)
+        if why:
+            dropped.append(f"{name} ({why})")
+        else:
+            # Not a chunk this tool knows to expect: say so, rather than
+            # listing it beside the ones that were dropped on purpose.
+            dropped.append(f"{name} (unrecognised -- contents unknown)")
+            unknown.append(name)
     if model.phys_file_id:
         dropped.append("PFID (physics rig)")
     if dropped:
         result.lossy("m2.chunks.dropped",
                      "dropped chunks with no 3.3.5a equivalent: " + ", ".join(dropped),
                      chunks=sorted(model.extra_chunks))
+    if unknown:
+        result.lossy("m2.chunks.unknown",
+                     f"{len(unknown)} of those are chunks this tool does not "
+                     f"recognise at all, so what they carried is unknown: "
+                     + ", ".join(sorted(unknown)),
+                     chunks=sorted(unknown))
 
 
 def validate(model: M2Model, opts: Options, result: FileResult) -> None:

@@ -17,7 +17,7 @@ from __future__ import annotations
 import struct
 import time
 
-from ..chunks import Chunk, ChunkReader, ChunkWriter
+from ..chunks import Chunk, ChunkReader, ChunkWriter, report_unknown
 from ..errors import MalformedFileError, UnsupportedFormatError
 from ..limits import ADT_VERSION
 from ..options import Options
@@ -108,6 +108,8 @@ def convert_wdt(data: bytes, source_name: str, opts: Options,
                  "the map claims a global WMO but carries no MWMO filename; "
                  "the reference may have been a FileDataID this tool cannot "
                  "place in a name table")
+
+    report_unknown(res, chunks, KNOWN, "map-index", "wdt.chunks.unknown")
 
     if modern:
         res.lossy("wdt.chunks.dropped",

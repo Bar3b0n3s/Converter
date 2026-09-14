@@ -21,7 +21,7 @@ import dataclasses
 import struct
 from typing import Sequence
 
-from ..chunks import Chunk, ChunkReader, ChunkWriter
+from ..chunks import Chunk, ChunkReader, ChunkWriter, report_unknown
 from ..errors import MalformedFileError, UnsupportedFormatError
 from ..limits import (
     MOBA_SIZE,
@@ -325,6 +325,8 @@ def convert_group_parts(data: bytes, source_name: str, opts: Options,
     if modern_seen:
         dropped = [n for n in modern_seen if n not in ("MOVX", "MPY2")]
         if dropped:
+            report_unknown(res, [c.name for c in group.subchunks], ALL_KNOWN,
+                           "world-object group", "wmo.group.chunks_unknown")
             res.lossy("wmo.group.chunks_dropped",
                       "dropped group chunks with no 3.3.5a equivalent: "
                       + ", ".join(f"{n} ({MODERN_GROUP_CHUNKS[n]})"

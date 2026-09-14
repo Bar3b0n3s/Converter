@@ -126,3 +126,25 @@ class ChunkWriter:
 
     def __len__(self) -> int:
         return len(self.buf)
+
+
+def report_unknown(result, seen: Iterable[str], known: Iterable[str],
+                   what: str, code: str) -> list[str]:
+    """Report chunks the converter has no knowledge of at all.
+
+    Each converter already names the post-Wrath chunks it deliberately drops.
+    This covers the other case: a chunk in neither list, which is either
+    something Blizzard added after this tool was written or something nobody
+    documented.  Dropping it is still the only option, but doing so without
+    saying which chunk it was hides the one thing that would explain a tile or
+    a model that does not look right.
+    """
+    known = set(known)
+    extra = sorted({name for name in seen if name not in known})
+    if extra:
+        result.lossy(code,
+                     f"dropped {len(extra)} {what} chunk(s) this tool does not "
+                     f"recognise, so what they carried is unknown: "
+                     + ", ".join(extra),
+                     chunks=extra)
+    return extra

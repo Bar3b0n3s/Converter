@@ -7,7 +7,6 @@ import os
 import struct
 import time
 
-from ..chunks import ChunkWriter
 from ..limits import (
     MODD_SIZE,
     MOHD_SIZE,
@@ -25,7 +24,9 @@ from ..report import FileResult, Status
 from ..resolve import AssetSource
 from ..limits import MOGI_SIZE
 from .group import convert_group_parts
-from .root import MODERN_ROOT_CHUNKS, StringTable, WmoRoot, parse_root, split_string_table
+from ..chunks import ChunkWriter, report_unknown
+from .root import (ALL_KNOWN as ALL_KNOWN_ROOT, MODERN_ROOT_CHUNKS,
+                   StringTable, WmoRoot, parse_root, split_string_table)
 
 
 @dataclasses.dataclass(slots=True)
@@ -290,6 +291,9 @@ def convert_wmo_root(data: bytes, source_name: str, opts: Options,
         res.lossy("wmo.lod",
                   f"dropped {root.num_lod} level(s) of detail; 3.3.5a renders "
                   f"the base geometry only", num_lod=root.num_lod)
+
+    report_unknown(res, root.chunks, ALL_KNOWN_ROOT, "world-object",
+                   "wmo.chunks.unknown")
 
     if modern:
         res.lossy("wmo.chunks.dropped",

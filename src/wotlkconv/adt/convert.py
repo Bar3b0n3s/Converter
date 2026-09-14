@@ -41,7 +41,7 @@ import pathlib
 import struct
 import time
 
-from ..chunks import Chunk, ChunkReader, ChunkWriter
+from ..chunks import Chunk, ChunkReader, ChunkWriter, report_unknown
 from ..errors import MalformedFileError, UnsupportedFormatError
 from ..limits import ADT_MCNK_COUNT, ADT_VERSION
 from ..listfile import Listfile, normalise
@@ -89,6 +89,16 @@ MODERN_CHUNKS = {
 }
 
 #: MHDR field order; the offsets are written back in this sequence.
+#: Everything a 3.3.5a tile is made of, top level and inside an MCNK.  Used to
+#: tell a chunk this tool drops on purpose from one it has never seen.
+WOTLK_CHUNKS = {
+    "MVER", "MHDR", "MCIN", "MTEX", "MMDX", "MMID", "MWMO", "MWID", "MDDF",
+    "MODF", "MCNK", "MFBO", "MH2O", "MTXF",
+    "MCVT", "MCCV", "MCNR", "MCLY", "MCRF", "MCSH", "MCAL", "MCLQ", "MCSE",
+    # the split-file spellings the merge reads and folds away
+    "MCRD", "MCRW", "MCMT", "MCDD", "MCBB", "MCLV",
+}
+
 MHDR_FIELDS = ("MCIN", "MTEX", "MMDX", "MMID", "MWMO", "MWID", "MDDF",
                "MODF", "MFBO", "MH2O", "MTXF")
 
@@ -386,6 +396,12 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
     }
 
     # -- map chunks ------------------------------------------------------
+    # Every chunk name the three files carry, top level and inside an MCNK, so
+    # one nobody has seen before can be named rather than quietly discarded.
+    seen_chunks: set[str] = set(root_named) | set(tex_named) | set(obj_named)
+    if root_mcnks or tex_mcnks or obj_mcnks:
+        seen_chunks.add("MCNK")
+
     counters: dict[str, int] = {}
     merged_mcnks: list[bytes] = []
     for index, chunk in enumerate(root_mcnks):
@@ -394,6 +410,7 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
             pieces |= _subchunks(tex_mcnks[index].data, reverse)
         if index < len(obj_mcnks):
             pieces |= _subchunks(obj_mcnks[index].data, reverse)
+        seen_chunks |= set(pieces)
         merged_mcnks.append(
             _build_mcnk(chunk.data, pieces, reverse, res, counters))
 
@@ -459,6 +476,9 @@ def convert_adt(parts: AdtParts, source_name: str, opts: Options,
     for i, name in enumerate(MHDR_FIELDS):
         struct.pack_into("<I", mhdr, 4 + i * 4, offsets.get(name, 0))
     out[mhdr_data_pos : mhdr_data_pos + MHDR_SIZE] = mhdr
+
+    report_unknown(res, seen_chunks, WOTLK_CHUNKS | set(MODERN_CHUNKS),
+                   "terrain", "adt.chunks.unknown")
 
     if modern:
         res.lossy("adt.chunks.dropped",
